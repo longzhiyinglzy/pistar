@@ -785,7 +785,7 @@ _CONFIGS = [
         num_train_steps=30_000,
         keep_period=10_000,
     ),
-    # Pi05_star model Fine-tuning on Libero Config
+    # Pi05_star model fine-tuning on libero config
     TrainConfig(
         name="pi05_star_libero",
         project_name="pistar",
@@ -806,10 +806,10 @@ _CONFIGS = [
         ema_decay=0.999,
         weight_loader=weight_loaders.CheckpointWeightLoader("/public/home/chenyuyao1/model/pi05_base/params"),
         pytorch_weight_path="/path/to/your/pytorch_weight_path",
-        num_train_steps=20_000,
+        num_train_steps=30_000,
         keep_period=10_000,
     ),
-    # Pi05_star model Inference on Libero Config
+    # Pi05_star model inference on libero config
     TrainConfig(
         name="pi05_star_libero_infer",
         project_name="pistar",
@@ -832,7 +832,57 @@ _CONFIGS = [
         ema_decay=0.999,
         weight_loader=weight_loaders.CheckpointWeightLoader("/public/home/chenyuyao1/model/pi05_base/params"),
         pytorch_weight_path="/path/to/your/pytorch_weight_path",
-        num_train_steps=20_000,
+        num_train_steps=30_000,
+        keep_period=10_000,
+    ),
+    # Pi05_star model fine-tuning on local piper plug dataset config
+    TrainConfig(
+        name="pi05_star_piper_plug",
+        project_name="pistar",
+        model=pi0_config.Pi0Config(pi05=True, pistar=True, action_horizon=10, discrete_state_input=True),
+        data=LeRobotLiberoDataConfig(
+            repo_id="ybpy/piper_plug_pistar_all_positive",
+            base_config=DataConfig(prompt_from_task=True),
+            extra_delta_transform=False,
+        ),
+        batch_size=32,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=10_000,
+            peak_lr=2e-4,
+            decay_steps=30_000,
+            decay_lr=2e-5,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=0.999,
+        weight_loader=weight_loaders.CheckpointWeightLoader("/public/home/chenyuyao1/model/pi05_base/params"),
+        pytorch_weight_path="/path/to/your/pytorch_weight_path",
+        num_train_steps=30_000,
+        keep_period=10_000,
+    ),
+    # Pi05_star model inference on local piper plug dataset config
+    TrainConfig(
+        name="pi05_star_piper_plug_infer",
+        project_name="pistar",
+        model=pi0_config.Pi0Config(pi05=True, pistar=True, action_horizon=10, discrete_state_input=True),
+        data=LeRobotLiberoDataConfig(
+            repo_id="ybpy/piper_plug_pistar_all_positive",
+            base_config=DataConfig(prompt_from_task=True),
+            extra_delta_transform=False,
+            adv_ind_dropout=False,
+            # Disable adv_ind dropout during inference
+        ),
+        batch_size=32,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=10_000,
+            peak_lr=2e-4,
+            decay_steps=30_000,
+            decay_lr=2e-5,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=0.999,
+        weight_loader=weight_loaders.CheckpointWeightLoader("/public/home/chenyuyao1/model/pi05_base/params"),
+        pytorch_weight_path="/path/to/your/pytorch_weight_path",
+        num_train_steps=30_000,
         keep_period=10_000,
     ),
     #
