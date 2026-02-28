@@ -267,7 +267,8 @@ class TokenizePrompt(DataTransformFn):
                 raise ValueError("Adv_ind is required.")
         else:
             # Remove adv_ind even if not used, to avoid passing strings to JAX
-            adv_ind = data.pop("adv_ind", None)
+            data.pop("adv_ind", None)
+            adv_ind = None
 
         if not isinstance(prompt, str):
             prompt = prompt.item()
