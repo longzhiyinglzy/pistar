@@ -227,11 +227,12 @@ class LiberoRolloutLeRobotWriter:
         return np.full((episode_length,), self.penalty_value, dtype=np.float32)
 
     def _compute_rewards(self, episode_length: int, success: bool) -> np.ndarray:
+        rewards = np.full((episode_length,), -1.0 / float(episode_length), dtype=np.float32)
         if success:
-            rewards = np.zeros((episode_length,), dtype=np.float32)
-            rewards[-1] = 1.0
-            return rewards
-        return np.zeros((episode_length,), dtype=np.float32)
+            rewards[-1] = 0.0
+        else:
+            rewards[-1] = -1.0
+        return rewards
 
 
 def eval_libero(args: Args) -> None:
@@ -377,6 +378,7 @@ def eval_libero(args: Args) -> None:
                                 "wrist_image": np.ascontiguousarray(wrist_img_flipped),
                                 "state": np.asarray(obs_state, dtype=np.float32),
                                 "actions": np.asarray(action, dtype=np.float32),
+                                "abs_pose": np.asarray(np.concatenate((obs_state[:6], action[-1:]), axis=-1), dtype=np.float32),
                             }
                         )
                     if done:
