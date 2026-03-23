@@ -89,6 +89,14 @@ class Args:
 
     seed: int = 7  # Random Seed (for reproducibility)
 
+    #################################################################################################################
+    # Debug raw LIBERO observations (no model inference)
+    #################################################################################################################
+    debug_raw_obs_only: bool = False  # If True, run a raw observation sanity test and exit
+    debug_task_id: int = 0  # Task id used by raw observation sanity test
+    debug_num_steps: int = 5  # Number of LIBERO_DUMMY_ACTION steps for raw observation sanity test
+    debug_out_dir: str = "data/libero/debug_raw_obs"  # Directory to save raw / processed debug images and video
+
 
 class LiberoRolloutLeRobotWriter:
     """Write LIBERO rollout trajectories to a LeRobot dataset with PI* value labels."""
@@ -105,7 +113,8 @@ class LiberoRolloutLeRobotWriter:
         self._LeRobotDataset = LeRobotDataset
         self.repo_id = args.rollout_repo_id
         self.penalty_value = args.rollout_penalty_value
-        self.image_size = args.resize_size
+        # Rollout dataset stores flipped raw camera images at original LIBERO render resolution.
+        self.image_size = LIBERO_ENV_RESOLUTION
 
         if args.rollout_output_dir:
             self.dataset_path = pathlib.Path(args.rollout_output_dir) / self.repo_id
@@ -226,6 +235,10 @@ class LiberoRolloutLeRobotWriter:
 
 
 def eval_libero(args: Args) -> None:
+    if args.debug_raw_obs_only:
+        _debug_libero_raw_obs(args)
+        return
+
     # Set random seed
     np.random.seed(args.seed)
 
@@ -313,13 +326,13 @@ def eval_libero(args: Args) -> None:
 
                     # Get preprocessed image
                     # IMPORTANT: rotate 180 degrees to match train preprocessing
-                    img = np.ascontiguousarray(obs["agentview_image"][::-1, ::-1])
-                    wrist_img = np.ascontiguousarray(obs["robot0_eye_in_hand_image"][::-1, ::-1])
+                    img_flipped = np.ascontiguousarray(obs["agentview_image"][::-1, ::-1])
+                    wrist_img_flipped = np.ascontiguousarray(obs["robot0_eye_in_hand_image"][::-1, ::-1])
                     img = image_tools.convert_to_uint8(
-                        image_tools.resize_with_pad(img, args.resize_size, args.resize_size)
+                        image_tools.resize_with_pad(img_flipped, args.resize_size, args.resize_size)
                     )
                     wrist_img = image_tools.convert_to_uint8(
-                        image_tools.resize_with_pad(wrist_img, args.resize_size, args.resize_size)
+                        image_tools.resize_with_pad(wrist_img_flipped, args.resize_size, args.resize_size)
                     )
 
                     # Save preprocessed image for replay video
@@ -360,8 +373,8 @@ def eval_libero(args: Args) -> None:
                     if rollout_writer is not None:
                         rollout_steps.append(
                             {
-                                "image": np.ascontiguousarray(img),
-                                "wrist_image": np.ascontiguousarray(wrist_img),
+                                "image": np.ascontiguousarray(img_flipped),
+                                "wrist_image": np.ascontiguousarray(wrist_img_flipped),
                                 "state": np.asarray(obs_state, dtype=np.float32),
                                 "actions": np.asarray(action, dtype=np.float32),
                             }
@@ -419,6 +432,82 @@ def _get_libero_env(task, resolution, seed):
     env = OffScreenRenderEnv(**env_args)
     env.seed(seed)  # IMPORTANT: seed seems to affect object positions even when using fixed initial state
     return env, task_description
+
+
+def _debug_libero_raw_obs(args: Args) -> None:
+    """Run a small no-policy sanity test to inspect raw LIBERO camera observations."""
+    np.random.seed(args.seed)
+
+    benchmark_dict = benchmark.get_benchmark_dict()
+    task_suite = benchmark_dict[args.task_suite_name]()
+    if args.debug_task_id < 0 or args.debug_task_id >= task_suite.n_tasks:
+        raise ValueError(
+            f"debug_task_id={args.debug_task_id} is out of range for {args.task_suite_name} (n_tasks={task_suite.n_tasks})."
+        )
+
+    task = task_suite.get_task(args.debug_task_id)
+    initial_states = task_suite.get_task_init_states(args.debug_task_id)
+    env, task_description = _get_libero_env(task, LIBERO_ENV_RESOLUTION, args.seed)
+
+    out_dir = pathlib.Path(args.debug_out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    logging.info("[debug_raw_obs] task_suite=%s task_id=%d task=%s", args.task_suite_name, args.debug_task_id, task_description)
+    logging.info("[debug_raw_obs] camera resolution configured in env: %dx%d", LIBERO_ENV_RESOLUTION, LIBERO_ENV_RESOLUTION)
+
+    env.reset()
+    obs = env.set_init_state(initial_states[0])
+
+    # Let the scene settle a bit.
+    for _ in range(max(0, args.num_steps_wait)):
+        obs, _, _, _ = env.step(LIBERO_DUMMY_ACTION)
+
+    viz_frames = []
+
+    for step_idx in range(max(1, args.debug_num_steps)):
+        raw_agent = np.ascontiguousarray(obs["agentview_image"])
+        raw_wrist = np.ascontiguousarray(obs["robot0_eye_in_hand_image"])
+
+        proc_agent = image_tools.convert_to_uint8(
+            image_tools.resize_with_pad(raw_agent[::-1, ::-1], args.resize_size, args.resize_size)
+        )
+        proc_wrist = image_tools.convert_to_uint8(
+            image_tools.resize_with_pad(raw_wrist[::-1, ::-1], args.resize_size, args.resize_size)
+        )
+
+        logging.info(
+            "[debug_raw_obs][step=%d] raw agent shape=%s dtype=%s min=%s max=%s | raw wrist shape=%s dtype=%s min=%s max=%s",
+            step_idx,
+            raw_agent.shape,
+            raw_agent.dtype,
+            raw_agent.min(),
+            raw_agent.max(),
+            raw_wrist.shape,
+            raw_wrist.dtype,
+            raw_wrist.min(),
+            raw_wrist.max(),
+        )
+
+        row_top = np.concatenate([raw_agent, raw_wrist], axis=1)
+        row_bottom = np.concatenate([proc_agent, proc_wrist], axis=1)
+        if row_bottom.shape[1] != row_top.shape[1]:
+            row_bottom = image_tools.resize_with_pad(row_bottom, row_top.shape[0], row_top.shape[1])
+        panel = np.concatenate([row_top, row_bottom], axis=0)
+
+        imageio.imwrite(out_dir / f"debug_step_{step_idx:03d}_raw_agent.png", raw_agent)
+        imageio.imwrite(out_dir / f"debug_step_{step_idx:03d}_raw_wrist.png", raw_wrist)
+        imageio.imwrite(out_dir / f"debug_step_{step_idx:03d}_proc_agent.png", proc_agent)
+        imageio.imwrite(out_dir / f"debug_step_{step_idx:03d}_proc_wrist.png", proc_wrist)
+        imageio.imwrite(out_dir / f"debug_step_{step_idx:03d}_panel.png", panel)
+        viz_frames.append(panel)
+
+        obs, _, _, _ = env.step(LIBERO_DUMMY_ACTION)
+
+    if viz_frames:
+        imageio.mimwrite(out_dir / "debug_raw_vs_processed.mp4", [np.asarray(f) for f in viz_frames], fps=5)
+
+    env.close()
+    logging.info("[debug_raw_obs] Finished. Files saved to: %s", out_dir)
 
 
 def _quat2axisangle(quat):
