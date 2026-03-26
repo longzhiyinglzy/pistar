@@ -1,0 +1,3 @@
+swanlab==0.7.11
+accelerate==1.13.0
+decord==0.6.0

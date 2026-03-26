@@ -3,6 +3,14 @@ assets/
 checkpoints/
 data/
 wandb/
+dataset/
+dataset_meta_info/
+synthetic_traj/
+replay_outputs/
+init_gt_all/
+
+# meta info files
+*_metainfo.json
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

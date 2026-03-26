@@ -227,6 +227,12 @@ class LiberoRolloutLeRobotWriter:
         return np.full((episode_length,), self.penalty_value, dtype=np.float32)
 
     def _compute_rewards(self, episode_length: int, success: bool) -> np.ndarray:
+        # 01 reward
+        # if success:
+        #     rewards = np.zeros((episode_length,), dtype=np.float32)
+        #     rewards[-1] = 1.0
+        #     return rewards
+        # return np.zeros((episode_length,), dtype=np.float32)
         rewards = np.full((episode_length,), -1.0 / float(episode_length), dtype=np.float32)
         if success:
             rewards[-1] = 0.0

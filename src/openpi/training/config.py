@@ -940,7 +940,7 @@ _CONFIGS = [
     TrainConfig(
         name="pi05_star_libero",
         project_name="pistar",
-        model=pi0_config.Pi0Config(pi05=True, pistar=True, action_horizon=10, discrete_state_input=False),
+        model=pi0_config.Pi0Config(pi05=True, pistar=True, action_horizon=15, discrete_state_input=False),
         data=LeRobotLiberoDataConfig(
             repo_id="ybpy/libero_pistar",
             base_config=DataConfig(prompt_from_task=True),
@@ -964,7 +964,7 @@ _CONFIGS = [
     TrainConfig(
         name="pi05_star_libero_infer",
         project_name="pistar",
-        model=pi0_config.Pi0Config(pi05=True, pistar=True, action_horizon=10, discrete_state_input=False),
+        model=pi0_config.Pi0Config(pi05=True, pistar=True, action_horizon=15, discrete_state_input=False),
         data=LeRobotLiberoDataConfig(
             repo_id="ybpy/libero_pistar",
             base_config=DataConfig(prompt_from_task=True),
