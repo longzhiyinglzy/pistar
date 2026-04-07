@@ -161,7 +161,7 @@ def parse_args():
     )
     parser.add_argument("--batch_size", type=int, default=1024)
     parser.add_argument("--num_workers", type=int, default=8)
-    parser.add_argument("--epochs", type=int, default=20)
+    parser.add_argument("--epochs", type=int, default=30)
     parser.add_argument("--horizon", type=int, default=15)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--weight_decay", type=float, default=1e-6)
@@ -183,7 +183,7 @@ def parse_args():
     parser.add_argument("--wandb_run_name", type=str, default="pistar_dyn_train")
     parser.add_argument("--wandb_entity", type=str, default=None)
     parser.add_argument("--wandb_log_steps", type=int, default=100)
-    parser.add_argument("--wandb_resume", type=str2bool, default=True)
+    parser.add_argument("--wandb_resume", type=str2bool, default=False)
 
     return parser.parse_args()
 
