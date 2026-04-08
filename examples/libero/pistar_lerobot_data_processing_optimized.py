@@ -68,23 +68,23 @@ import numpy as np
 import tyro
 
 
-def transform_reward(original_reward: float, is_terminal: bool, is_last: bool, episode_length: int) -> float:
+def transform_reward(original_reward: float, is_last: bool, episode_length: int) -> float:
     """
     转换 reward 的规则：
-    1. 如果 is_terminal 或 is_last 为 True:
+    1. 如果 is_last 为 True:
        - 原始 reward = 1.0 → 0.0
        - 原始 reward = 0.0 → -1.0
-    2. 如果 is_terminal 和 is_last 都为 False (中间步骤):
+    2. 如果 is_last 为 False (中间步骤):
        - reward = -1 / episode_length
     """
-    if is_terminal or is_last:
-        # 至少一个为 True
+    if is_last:
+        # is_last 为 True
         if original_reward == 1.0:
             return 0.0
         else:  # original_reward == 0.0
             return -1.0
     else:
-        # 都为 False (中间步骤): reward = -1 / episode_length
+        # is_last 为 False (中间步骤): reward = -1 / episode_length
         return -1.0 / episode_length
 
 
@@ -260,11 +260,10 @@ def main(
                 # 判断是否为最后一步
                 is_last = (step_idx == episode_length - 1)
                 # 判断是否为 terminal (基于 original_reward)
-                is_terminal = (original_reward == 1.0) and is_last
                 
                 # 转换 reward
                 transformed_reward = transform_reward(
-                    original_reward, is_terminal, is_last, episode_length
+                    original_reward, is_last, episode_length
                 )
                 
                 # 获取或计算 value
@@ -407,10 +406,9 @@ def main(
                     original_reward = 1.0 if step_idx == episode_length - 1 else 0.0
                 
                 is_last = (step_idx == episode_length - 1)
-                is_terminal = (original_reward == 1.0) and is_last
                 
                 transformed_reward = transform_reward(
-                    original_reward, is_terminal, is_last, episode_length
+                    original_reward, is_last, episode_length
                 )
                 
                 if value_model_path:
@@ -443,10 +441,9 @@ def main(
                     original_reward = 1.0 if step_idx == episode_length - 1 else 0.0
                 
                 is_last = (step_idx == episode_length - 1)
-                is_terminal = (original_reward == 1.0) and is_last
                 
                 transformed_reward = transform_reward(
-                    original_reward, is_terminal, is_last, episode_length
+                    original_reward, is_last, episode_length
                 )
                 
                 if value_model_path:
