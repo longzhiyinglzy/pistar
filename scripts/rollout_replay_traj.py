@@ -39,7 +39,6 @@ def build_parser() -> ArgumentParser:
     parser.add_argument("--dataset_meta_info_path", type=str, default=None)
     parser.add_argument("--dataset_names", type=str, default=None)
     parser.add_argument("--dataset_cfgs", type=str, default=None)
-    parser.add_argument("--output_dir", type=str, default=None)
     parser.add_argument("--replay_output_dir", type=str, default=None)
 
     parser.add_argument("--mode", type=str, default=None)
