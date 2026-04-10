@@ -428,12 +428,11 @@ def main(args):
         if getattr(args, "wandb_entity", None):
             init_kwargs["entity"] = args.wandb_entity
 
-        is_resuming = bool(getattr(args, "resume_ckpt_path", None))
-        if is_resuming and wandb_id_path.exists():
+        if bool(getattr(args, "wandb_resume", False)) and wandb_id_path.exists():
             run_id = wandb_id_path.read_text().strip()
             if run_id:
                 init_kwargs["id"] = run_id
-                init_kwargs["resume"] = "must"
+                init_kwargs["resume"] = str(getattr(args, "wandb_resume_mode", "allow"))
 
         wandb_run = wandb.init(**init_kwargs)
         if wandb_run is not None and getattr(wandb_run, "id", None):
