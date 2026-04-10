@@ -57,10 +57,10 @@ You can use `--resume` to replace `--overwrite` in above command to restore late
 Create virtual environment for Simulation environment first.
 ```bash
 # Create virtual environment
-uv venv --python 3.10 /path/to/create/libero_rollout/venv
-source /path/to/your/libero_rollout/venv/bin/activate
+uv venv --python 3.10 /path/to/create/libero/venv
+source /path/to/your/libero/venv/bin/activate
 uv pip sync examples/libero/requirements.txt third_party/libero/requirements.txt \
-  --extra-index-url https://download.pytorch.org/whl/cu113 \ 
+  --extra-index-url https://download.pytorch.org/whl/cu113 \
   --index-strategy=unsafe-best-match
 uv pip install -e packages/openpi-client
 uv pip install -e third_party/libero
@@ -126,11 +126,12 @@ pip install -r wm_requirements.txt
 
 ### Checkpoint and Dataset
 
-| ckpt or dataset                                              | intro                                |
-| ------------------------------------------------------------ | ------------------------------------ |
-| [openai/clip-vit-base-patch32 · Hugging Face](https://huggingface.co/openai/clip-vit-base-patch32) | CLIP text and image encoder          |
-| [stabilityai/stable-video-diffusion-img2vid · Hugging Face](https://huggingface.co/stabilityai/stable-video-diffusion-img2vid) | pretrained SVD video diffusion model |
-| [yifengzhu-hf/LIBERO-datasets · Datasets at Hugging Face](https://huggingface.co/datasets/yifengzhu-hf/LIBERO-datasets) | LIBERO dataset                       |
+| ckpt or dataset                                              | intro                                     |
+| ------------------------------------------------------------ | ----------------------------------------- |
+| [openai/clip-vit-base-patch32 · Hugging Face](https://huggingface.co/openai/clip-vit-base-patch32) | CLIP text and image encoder               |
+| [stabilityai/stable-video-diffusion-img2vid · Hugging Face](https://huggingface.co/stabilityai/stable-video-diffusion-img2vid) | pretrained SVD video diffusion model      |
+| [yjguo/Ctrl-World · Hugging Face](https://huggingface.co/yjguo/Ctrl-World) | Ctrl-World model trained on DROID dataset |
+| [yifengzhu-hf/LIBERO-datasets · Datasets at Hugging Face](https://huggingface.co/datasets/yifengzhu-hf/LIBERO-datasets) | LIBERO dataset                            |
 
 ### Training
 
@@ -199,7 +200,7 @@ Dataset meta info will be in `/path/to/pistar/dataset_meta_info`.
 
 #### 2. Launch training
 
-After prepare the datasets, you can launch training.
+After preparing the datasets, specify `svd_model_path`, `clip_model_path`, `resume_ckpt_path`, `output_dir`, `dataset_root_path`, `dataset_meta_info_path`, `data_stat_path` in `pistar/src/openpi/training/config_wm.py` then you can launch training.
 
 ```bash
 torchrun --standalone --nnodes=1 --nproc_per_node=8 scripts/train_wm.py
@@ -215,3 +216,42 @@ python3 scripts/rollout_replay_traj.py --episode_id 99
 python3 scripts/rollout_replay_traj.py --episode_ids 0,99,100
 ```
 
+### Rollout by interacting with policy
+
+For the policy trained on LIBERO dataset outputs actions in delta eef format, while our world model take absolute pose in cartesian space as input, we need to train a dynamics network to transform policy's output to world model's input to support their interaction.
+
+Use the following command to train dynamics network:
+
+```bash
+source /path/to/your/pistar/venv/bin/activate
+python3 scripts/train_dyn.py \
+  --dataset_root /path/to/pistar/dataset/libero_wm \
+  --dyn_stat_path /path/to/pistar/dataset_meta_info/libero_wm/stat.json \
+  --save_dir /path/to/pistar/checkpoints/dynamics
+```
+
+Before rollout, we should get all initial state from libero environment.
+
+```bash
+source /path/to/your/libero/venv/bin/activate
+export PYTHONPATH=$PYTHONPATH:$PWD/third_party/libero
+export MUJOCO_GL=egl
+export PYOPENGL_PLATFORM=egl
+
+python3 examples/libero/get_init_gt.py \
+  --all_task_suites true \
+  --export_all_init_states true \
+  --output_dir examples/libero/init_gt_all \
+  --manifest_name init_gt_manifest_all.json \
+  --overwrite true
+```
+
+After all initial state of libero has been prepared, specify `ckpt_path`, `pi_ckpt`, `init_gt_manifest`, `dyn_ckpt_path` in `pistar/src/openpi/training/config_wm.py` then you can use the following command to do rollout:
+
+```bash
+source /path/to/your/pistar/venv/bin/activate
+python3 scripts/rollout_wm_libero.py 
+  --task_suite_name libero_10 \
+  --task_ids 0 1 2 \
+  --target_rollouts_per_task 1
+```
