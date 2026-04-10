@@ -975,9 +975,12 @@ def main():
                 # Save sparse transitions strictly aligned as:
                 #   (obs_j, action_j) -> obs_{j+1}
                 # Therefore only first (pred_step-1) observations have valid outgoing actions.
+                video_chunk_to_save = []
                 for step_j in range(max(0, pred_step - 1)):
                     base_out = preprocess_for_writer(video_dict_pred[args.policy_base_camera_idx][step_j], image_size=256)
                     wrist_out = preprocess_for_writer(video_dict_pred[args.policy_wrist_camera_idx][step_j], image_size=256)
+                    black_out = np.zeros_like(base_out)
+                    video_chunk_to_save.append(np.concatenate([base_out, wrist_out, black_out], axis=1))
 
                     state_to_save = np.asarray(state_ds[step_j], dtype=np.float32)
                     if state_to_save.shape[0] != 8:
@@ -997,7 +1000,8 @@ def main():
                         }
                     )
 
-                video_to_save.append(videos_cat)
+                if len(video_chunk_to_save) > 0:
+                    video_to_save.append(np.stack(video_chunk_to_save, axis=0))
                 info_to_save.append(policy_in_out)
 
                 # Keep history buffer as contiguous 5Hz timeline:
