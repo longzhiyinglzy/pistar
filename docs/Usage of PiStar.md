@@ -250,7 +250,7 @@ After all initial state of libero has been prepared, specify `ckpt_path`, `pi_ck
 
 ```bash
 source /path/to/your/pistar/venv/bin/activate
-python3 scripts/rollout_wm_libero.py 
+python3 scripts/rollout_wm_libero.py \
   --task_suite_name libero_10 \
   --task_ids 0 1 2 \
   --target_rollouts_per_task 1
