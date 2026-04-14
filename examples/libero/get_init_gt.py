@@ -137,8 +137,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--export_all_init_states", type=str2bool, default=False)
     parser.add_argument("--num_steps_wait", type=int, default=10)
     parser.add_argument("--camera_resolution", type=int, default=256)
-    parser.add_argument("--wm_height", type=int, default=192)
-    parser.add_argument("--wm_width", type=int, default=320)
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--output_dir", type=str, required=True)
     parser.add_argument("--manifest_name", type=str, default="init_gt_manifest.json")

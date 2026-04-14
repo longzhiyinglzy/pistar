@@ -26,7 +26,7 @@ class wm_args:
 
     # Default world-model checkpoint path for inference / rollout.
     # rollout_wm_libero.py uses this unless overridden by CLI --ckpt_path.
-    ckpt_path: str = "/public/home/chenyuyao1/code/pistar/checkpoints/Ctrl_World/libero_wm_droidpt/checkpoint-10000.pt"
+    ckpt_path: str = "/public/home/chenyuyao1/code/pistar/checkpoints/Ctrl_World/libero_wm_droidpt_unet2e-6_ae3e-6/checkpoint-10000.pt"
 
     # Policy checkpoint dir should be a training step directory containing `params/`
     # e.g. /.../checkpoints/pi05_star_libero/pi05_star_libero_no_state/20000
@@ -52,10 +52,14 @@ class wm_args:
 
     # Training output and optimization defaults for train_wm.py
     # output_dir is for training checkpoints / validation samples.
-    output_dir: str = "/public/home/chenyuyao1/code/pistar/checkpoints/Ctrl_World/libero_wm_droidpt"
+    output_dir: str = "/public/home/chenyuyao1/code/pistar/checkpoints/Ctrl_World/libero_wm_droidpt_unet2e-6_ae3e-6"
     # replay_output_dir is for GT-conditioned replay videos and metadata json.
-    replay_output_dir: str = "/public/home/chenyuyao1/code/pistar/replay_outputs/libero_wm_droidpt"
-    learning_rate: float = 3e-6
+    replay_output_dir: str = "/public/home/chenyuyao1/code/pistar/replay_outputs/libero_wm_droidpt_unet2e-6_ae3e-6"
+    learning_rate: float = 2e-6 # default 3e-6
+    # Optional grouped learning rates for WM training modules.
+    # If None, fall back to `learning_rate`.
+    unet_learning_rate: Optional[float] = 2e-6
+    action_encoder_learning_rate: Optional[float] = 3e-6
     train_batch_size: int = 4
     shuffle: bool = True
     num_workers: int = 4
@@ -70,7 +74,7 @@ class wm_args:
     # Optional wandb logging for world-model training.
     wandb_enabled: bool = True
     wandb_project: str = "pistar_wm"
-    wandb_run_name: Optional[str] = "pistar_wm_liberoft_droidpt_lr3e-6"
+    wandb_run_name: Optional[str] = "pistar_wm_liberoft_droidpt_unet2e-6_ae3e-6"
     wandb_entity: Optional[str] = None
     # Resume the wandb run recorded in output_dir/wandb_id.txt.
     # This is intentionally separate from resume_ckpt_path: using a model
@@ -114,7 +118,7 @@ class wm_args:
     adv_ind_input: str = "positive"
     action_horizon: int = 15
     pred_step: int = 5
-    interact_num: int = 12
+    interact_num: int = 40
     # raw-time (policy/dynamics) -> WM 5Hz mapping stride.
     # With action_horizon=15 and pred_step=5, required mapping indices are:
     #   [0, 3, 6, 9, 12]
@@ -181,6 +185,7 @@ class wm_args:
     task_name: str = "Rollouts_interact_pi_libero_wm"
     save_dir: str = "synthetic_traj"
     save_video: bool = True
+    save_writer_compare_video: bool = False
     save_info: bool = True
 
     # ========================
@@ -197,8 +202,8 @@ class wm_args:
     # ========================
     # Optional learned dynamics
     # ========================
-    use_dynamics: bool = False
-    dyn_ckpt_path: Optional[str] = None
+    use_dynamics: bool = True
+    dyn_ckpt_path: Optional[str] = "/public/home/chenyuyao1/code/pistar/checkpoints/dynamics/dynamics_epoch_030.pt"
     # Canonical keys: dyn_action_01/dyn_action_99/dyn_pose_01/dyn_pose_99.
     dyn_stat_path: Optional[str] = "/public/home/chenyuyao1/code/pistar/dataset_meta_info/libero_wm/stat.json"
     dyn_action_num: int = 15
@@ -231,6 +236,10 @@ class wm_args:
             raise ValueError("wandb_project must be non-empty when wandb_enabled=True")
         if len(str(self.replay_output_dir).strip()) == 0:
             raise ValueError("replay_output_dir must be non-empty")
+        if self.unet_learning_rate is not None and self.unet_learning_rate <= 0:
+            raise ValueError("unet_learning_rate must be > 0 when provided")
+        if self.action_encoder_learning_rate is not None and self.action_encoder_learning_rate <= 0:
+            raise ValueError("action_encoder_learning_rate must be > 0 when provided")
 
         if self.policy_downsample_stride != 3:
             raise ValueError("policy_downsample_stride must be 3 for raw->5Hz mapping [0,3,6,9,12]")

@@ -812,6 +812,7 @@ def build_parser() -> ArgumentParser:
     parser.add_argument("--gripper_max", type=float, default=None)
 
     parser.add_argument("--save_video", type=str2bool, default=None)
+    parser.add_argument("--save_writer_compare_video", type=str2bool, default=None)
     parser.add_argument("--save_info", type=str2bool, default=None)
     parser.add_argument("--task_name", type=str, default=None)
     parser.add_argument("--save_dir", type=str, default=None)
@@ -934,7 +935,7 @@ def main():
                 np.expand_dims(zero_img, axis=0),
             ]
 
-            video_to_save, info_to_save = [], []
+            video_to_save, raw_video_to_save, writer_video_to_save, info_to_save = [], [], [], []
             rollout_steps = []
 
             for interact_i in range(interact_num):
@@ -976,11 +977,19 @@ def main():
                 #   (obs_j, action_j) -> obs_{j+1}
                 # Therefore only first (pred_step-1) observations have valid outgoing actions.
                 video_chunk_to_save = []
+                raw_video_chunk_to_save = []
+                writer_video_chunk_to_save = []
                 for step_j in range(max(0, pred_step - 1)):
-                    base_out = preprocess_for_writer(video_dict_pred[args.policy_base_camera_idx][step_j], image_size=256)
-                    wrist_out = preprocess_for_writer(video_dict_pred[args.policy_wrist_camera_idx][step_j], image_size=256)
+                    base_raw = np.ascontiguousarray(video_dict_pred[args.policy_base_camera_idx][step_j])
+                    wrist_raw = np.ascontiguousarray(video_dict_pred[args.policy_wrist_camera_idx][step_j])
+                    base_out = preprocess_for_writer(base_raw, image_size=256)
+                    wrist_out = preprocess_for_writer(wrist_raw, image_size=256)
                     black_out = np.zeros_like(base_out)
                     video_chunk_to_save.append(np.concatenate([base_out, wrist_out, black_out], axis=1))
+                    if args.save_writer_compare_video:
+                        black_raw = np.zeros_like(base_raw)
+                        raw_video_chunk_to_save.append(np.concatenate([base_raw, wrist_raw, black_raw], axis=1))
+                        writer_video_chunk_to_save.append(np.concatenate([base_out, wrist_out, black_out], axis=1))
 
                     state_to_save = np.asarray(state_ds[step_j], dtype=np.float32)
                     if state_to_save.shape[0] != 8:
@@ -1002,6 +1011,9 @@ def main():
 
                 if len(video_chunk_to_save) > 0:
                     video_to_save.append(np.stack(video_chunk_to_save, axis=0))
+                if args.save_writer_compare_video and len(raw_video_chunk_to_save) > 0:
+                    raw_video_to_save.append(np.stack(raw_video_chunk_to_save, axis=0))
+                    writer_video_to_save.append(np.stack(writer_video_chunk_to_save, axis=0))
                 info_to_save.append(policy_in_out)
 
                 # Keep history buffer as contiguous 5Hz timeline:
@@ -1032,6 +1044,21 @@ def main():
                 pathlib.Path(filename_video).parent.mkdir(parents=True, exist_ok=True)
                 mediapy.write_video(filename_video, video, fps=args.rollout_fps)
                 print(f"Saving video to {filename_video}")
+                if args.save_writer_compare_video and len(raw_video_to_save) > 0 and len(writer_video_to_save) > 0:
+                    video_raw = np.concatenate(raw_video_to_save, axis=0)
+                    video_writer = np.concatenate(writer_video_to_save, axis=0)
+                    filename_video_raw = (
+                        f"{args.save_dir}/{args.task_name}/video/"
+                        f"{args.config_name}_time_{uuid}_{episode_tag}_{text_id}_raw.mp4"
+                    )
+                    filename_video_writer = (
+                        f"{args.save_dir}/{args.task_name}/video/"
+                        f"{args.config_name}_time_{uuid}_{episode_tag}_{text_id}_writer256.mp4"
+                    )
+                    mediapy.write_video(filename_video_raw, video_raw, fps=args.rollout_fps)
+                    mediapy.write_video(filename_video_writer, video_writer, fps=args.rollout_fps)
+                    print(f"Saving raw comparison video to {filename_video_raw}")
+                    print(f"Saving writer comparison video to {filename_video_writer}")
 
             # TODO: replace with a learned rollout-success classifier (final frame or full video).
             rollout_success = True
