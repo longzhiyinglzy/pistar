@@ -195,6 +195,7 @@ class LiberoRolloutLeRobotWriter:
 
         value_labels = self._compute_value_labels(len(steps), success)
         rewards = self._compute_rewards(len(steps), success)
+        reward_labels = self._compute_reward_labels(len(steps), success)
         for idx, step in enumerate(steps):
             frame = {
                 "image": step["image"],
@@ -204,6 +205,7 @@ class LiberoRolloutLeRobotWriter:
                 "intervention": np.asarray([0], dtype=np.int64),  # No manual intervention in LIBERO deployment
                 "value_label": np.asarray([value_labels[idx]], dtype=np.float32),
                 "reward": np.asarray([rewards[idx]], dtype=np.float32),
+                "reward_label": np.asarray([reward_labels[idx]], dtype=np.float32)
             }
             self._add_frame(frame, task=task)
 
@@ -233,12 +235,14 @@ class LiberoRolloutLeRobotWriter:
             rewards[-1] = 1.0
             return rewards
         return np.zeros((episode_length,), dtype=np.float32)
-        # rewards = np.full((episode_length,), -1.0 / float(episode_length), dtype=np.float32)
-        # if success:
-        #     rewards[-1] = 0.0
-        # else:
-        #     rewards[-1] = -1.0
-        # return rewards
+        
+    def _compute_reward_labels(self, episode_length: int, success: bool) -> np.ndarray:
+        reward_labels = np.full((episode_length,), -1.0 / float(episode_length), dtype=np.float32)
+        if success:
+            reward_labels[-1] = 0.0
+        else:
+            reward_labels[-1] = -1.0
+        return reward_labels
 
 
 def eval_libero(args: Args) -> None:
