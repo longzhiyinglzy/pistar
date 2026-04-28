@@ -29,11 +29,8 @@ Before executing following command, make sure the pistar venv have been activate
 ### 1. Convert your data to a LeRobot dataset
 
 ```bash
-python examples/libero/pistar_data_processing_optimized.py \
-  --data_dir /path/to/modified_libero_rlds \
-  --default_adv_ind positive
-or 
-python -u examples/libero/pistar_data_processing_optimized.py ...
+python examples/libero/pistar_rlds_demo_processing.py \
+  --data_dir /path/to/modified_libero_rlds
 ```
 
 ### 2. Compute the normalization statistics for the training data
