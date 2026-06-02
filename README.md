@@ -57,6 +57,8 @@ Recommended order:
 
 ### 1. Convert demo data
 
+You can download the raw LIBERO dataset (rlds format, filtering failure episodes) from [here](https://huggingface.co/datasets/openvla/modified_libero_rlds). 
+
 LIBERO demo data uses the PiStar-specific conversion script. This script fills in the fields required for training both the VLM and PiStar:
 
 ```bash
