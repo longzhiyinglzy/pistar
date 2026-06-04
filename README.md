@@ -20,6 +20,8 @@ GIT_LFS_SKIP_SMUDGE=1 uv sync --active
 GIT_LFS_SKIP_SMUDGE=1 uv pip install -e .
 
 uv pip install -r pistar_requirements.txt
+
+sudo -E apt update && sudo -E apt install screen -y
 ```
 
 ## PiStar Data Closed Loop
