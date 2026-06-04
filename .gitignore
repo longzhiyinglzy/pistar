@@ -8,6 +8,7 @@ dataset_meta_info/
 synthetic_traj/
 replay_outputs/
 init_gt_all/
+!control_your_robot/data/
 
 # meta info files
 *_metainfo.json
