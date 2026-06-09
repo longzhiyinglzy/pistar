@@ -7,6 +7,7 @@ from typing import Literal, Protocol, SupportsIndex, TypeVar
 
 import jax
 import jax.numpy as jnp
+import openpi.shared.hf_datasets_compat  # noqa: F401
 import lerobot.common.datasets.lerobot_dataset as lerobot_dataset
 import numpy as np
 import torch
@@ -17,6 +18,32 @@ from openpi.training.droid_rlds_dataset import DroidRldsDataset
 import openpi.transforms as _transforms
 
 T_co = TypeVar("T_co", covariant=True)
+
+
+def _hf_transform_to_torch_allow_dict(items_dict: dict):
+    """HuggingFace -> torch 转换，同时允许 image bytes dict 原样通过。"""
+    from PIL import Image as PILImage
+    try:
+        from torchvision import transforms as tv_transforms
+
+        to_tensor = tv_transforms.ToTensor()
+    except Exception:
+        to_tensor = None
+    for key in items_dict:
+        first_item = items_dict[key][0]
+        if isinstance(first_item, PILImage.Image):
+            if to_tensor is None:
+                items_dict[key] = [torch.tensor(np.asarray(img)).permute(2, 0, 1) / 255.0 for img in items_dict[key]]
+            else:
+                items_dict[key] = [to_tensor(img) for img in items_dict[key]]
+        elif first_item is None:
+            pass
+        elif isinstance(first_item, dict):
+            # 例如 {"bytes": ...} 或 {"path": ...}，交给后续 ValueInputs 解析
+            items_dict[key] = items_dict[key]
+        else:
+            items_dict[key] = [x if isinstance(x, str) else torch.tensor(x) for x in items_dict[key]]
+    return items_dict
 
 
 class Dataset(Protocol[T_co]):
@@ -131,21 +158,29 @@ def create_torch_dataset(
     data_config: _config.DataConfig, action_horizon: int, model_config: _model.BaseModelConfig
 ) -> Dataset:
     """Create a dataset for training."""
-    repo_id = data_config.repo_id
+    if data_config.local_data_dir is not None:
+        local_dir = data_config.local_data_dir
+        if not os.path.exists(local_dir):
+            raise ValueError(f"Local data directory does not exist: {local_dir}")
+        repo_id = local_dir
+    else:
+        repo_id = data_config.repo_id
+
     if repo_id is None:
         raise ValueError("Repo ID is not set. Cannot create dataset.")
     if repo_id == "fake":
         return FakeDataset(model_config, num_samples=1024)
 
-    # root: /path/to/your/dataset/lerobot/libero
-    dataset_meta = lerobot_dataset.LeRobotDatasetMetadata(repo_id) #, root="/public/home/chenyuyao1/dataset/lerobot/libero")
+    dataset_meta = lerobot_dataset.LeRobotDatasetMetadata(repo_id)
     dataset = lerobot_dataset.LeRobotDataset(
-        data_config.repo_id,
-        # root="/public/home/chenyuyao1/dataset/lerobot/libero",
+        repo_id,
         delta_timestamps={
             key: [t / dataset_meta.fps for t in range(action_horizon)] for key in data_config.action_sequence_keys
         },
     )
+
+    if hasattr(dataset, "hf_dataset") and dataset.hf_dataset is not None:
+        dataset.hf_dataset.set_transform(_hf_transform_to_torch_allow_dict)
 
     if data_config.prompt_from_task:
         dataset = TransformedDataset(dataset, [_transforms.PromptFromLeRobotTask(dataset_meta.tasks)])
@@ -167,7 +202,7 @@ def create_rlds_dataset(
         shuffle=shuffle,
         action_chunk_size=action_horizon,
         action_space=data_config.action_space,
-        datasets=data_config.datasets,
+        filter_dict_path=data_config.filter_dict_path,
     )
 
 
@@ -451,6 +486,11 @@ class TorchDataLoader:
     def torch_loader(self) -> torch.utils.data.DataLoader:
         return self._data_loader
 
+    def __len__(self) -> int:
+        if self._num_batches is not None:
+            return self._num_batches
+        return len(self._data_loader)
+
     def __iter__(self):
         num_items = 0
         while True:
@@ -540,3 +580,76 @@ class DataLoaderImpl(DataLoader):
     def __iter__(self):
         for batch in self._data_loader:
             yield _model.Observation.from_dict(batch), batch["actions"]
+
+
+class ValueDataLoaderImpl(DataLoader):
+    def __init__(
+        self,
+        data_config: _config.DataConfig,
+        data_loader: TorchDataLoader,
+        dataset: Dataset,
+    ):
+        self._data_config = data_config
+        self._data_loader = data_loader
+        self.dataset = dataset
+
+    def data_config(self) -> _config.DataConfig:
+        return self._data_config
+
+    def __len__(self) -> int:
+        try:
+            return len(self._data_loader)
+        except TypeError:
+            return len(self.dataset)
+
+    def __iter__(self):
+        for batch in self._data_loader:
+            yield _model.Observation.from_dict(batch), batch["value"]
+
+
+def create_value_data_loader(
+    data_config: _config.DataConfig,
+    model_config: _model.BaseModelConfig,
+    *,
+    batch_size: int,
+    sharding: jax.sharding.Sharding | None = None,
+    shuffle: bool = False,
+    num_batches: int | None = None,
+    num_workers: int = 0,
+    seed: int = 0,
+    skip_norm_stats: bool = True,
+    framework: Literal["jax", "pytorch"] = "jax",
+) -> DataLoader[tuple[_model.Observation, jnp.ndarray]]:
+    dataset = create_torch_dataset(data_config, model_config.action_horizon, model_config)
+    dataset = transform_dataset(dataset, data_config, skip_norm_stats=skip_norm_stats)
+
+    sampler = None
+    if framework == "pytorch":
+        if torch.distributed.is_initialized():
+            sampler = torch.utils.data.distributed.DistributedSampler(
+                dataset,
+                num_replicas=torch.distributed.get_world_size(),
+                rank=torch.distributed.get_rank(),
+                shuffle=shuffle,
+                drop_last=True,
+            )
+            local_batch_size = batch_size // torch.distributed.get_world_size()
+        else:
+            local_batch_size = batch_size
+    else:
+        local_batch_size = batch_size // jax.process_count()
+
+    logging.info(f"local_batch_size: {local_batch_size}")
+    data_loader = TorchDataLoader(
+        dataset,
+        local_batch_size=local_batch_size,
+        sharding=None if framework == "pytorch" else sharding,
+        shuffle=(sampler is None and shuffle),
+        sampler=sampler,
+        num_batches=num_batches,
+        num_workers=num_workers,
+        seed=seed,
+        framework=framework,
+    )
+
+    return ValueDataLoaderImpl(data_config, data_loader, dataset)
