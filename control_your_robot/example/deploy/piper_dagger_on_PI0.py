@@ -32,6 +32,8 @@ joint_limits_rad = [
     (math.radians(-120), math.radians(120)),
 ]
 gripper_limit = [(0.0, 1.0)]
+GRIPPER_CLOSE_THRESHOLD = 0.5
+GRIPPER_CLOSE_OFFSET = 0.1
 GRIPPER_INTERVENTION_DEADBAND = 0.15  # 15% - must overcome to release gripper hold on intervention entry
 FIXED_MASTER_RESET_JOINT = [
     0.05902703429555556,
@@ -197,6 +199,8 @@ def output_transform(action):
         for i in range(6)
     ]
     gripper = clamp(action_7d[6], gripper_limit[0][0], gripper_limit[0][1])
+    if gripper <= GRIPPER_CLOSE_THRESHOLD:
+        gripper = clamp(gripper - GRIPPER_CLOSE_OFFSET, gripper_limit[0][0], gripper_limit[0][1])
 
     return {
         "joint": joints,
@@ -370,29 +374,34 @@ if __name__ == "__main__":
 
 
 
-    parser.add_argument("--model-path", type=str, default="/app/checkpoint/toymerge2/14000", help="checkpoint 根目录")
+    parser.add_argument("--model-path", type=str, default="/app/checkpoint/white_426_100_r1_r3_r3new/24000", help="checkpoint 根目录")
 
     #plug
-    # parser.add_argument("--task-name", type=str, default="put the white plug into the two-hole socket", help="任务名称")
-    # parser.add_argument("--train-config", type=str, default="pi05_star_white_plug_infer", help="训练配置名")
+    parser.add_argument("--task-name", type=str, default="put the white plug into the two-hole socket", help="任务名称")
+    parser.add_argument("--train-config", type=str, default="pi05_star_white_plug_infer", help="训练配置名")
 
 
     #toy
     
-    parser.add_argument("--task-name", type=str, default="Put these toys into the box", help="任务名称")
-    parser.add_argument("--train-config", type=str, default="toy_419_all_positive_infer", help="训练配置名")
+    # parser.add_argument("--task-name", type=str, default="Put these toys into the box", help="任务名称")
+    # parser.add_argument("--train-config", type=str, default="toy_419_all_positive_infer", help="训练配置名")
 
 
 
 
     parser.add_argument("--num-episode", type=int, default=100, help="episode 数量")
-    parser.add_argument("--repo-id", type=str, default="toy_rollout3", help="数据集 repo_id")
+    parser.add_argument("--repo-id", type=str, default="white_rollout3_new_test", help="数据集 repo_id")
     parser.add_argument("--output-dir", type=str, default="/app/dataset/rollout", help="数据输出目录")
     parser.add_argument("--fps", type=int, default=10, help="数据采集频率")
     parser.add_argument("--mirror-fps", type=int, default=200, help="镜像线程频率")
     parser.add_argument("--penalty-value", type=float, default=-1.0, help="失败惩罚值")
     parser.add_argument("--adv-ind", type=str, default=None, help="PiStar 配置使用的 adv_ind，例如 positive/negative；普通 pi05 会忽略")
+    parser.add_argument("--gripper-close-threshold", type=float, default=0.5, help="模型夹爪输出小于等于该值时应用闭合增强")
+    parser.add_argument("--gripper-close-offset", type=float, default=0.1, help="闭合增强时从模型夹爪输出中减去的开度偏置")
     args = parser.parse_args()
+
+    GRIPPER_CLOSE_THRESHOLD = max(0.0, min(args.gripper_close_threshold, 1.0))
+    GRIPPER_CLOSE_OFFSET = max(0.0, min(args.gripper_close_offset, 1.0))
 
     MODEL_PATH = args.model_path
     TASK_NAME = args.task_name
@@ -443,6 +452,7 @@ if __name__ == "__main__":
     print(f"dataset: {REPO_ID}")
     print(f"output: {OUTPUT_DIR}")
     print(f"adv_ind: {ADV_IND if ADV_IND is not None else 'None (pi05 default)'}")
+    print(f"gripper close boost: output <= {GRIPPER_CLOSE_THRESHOLD}, offset {GRIPPER_CLOSE_OFFSET}")
     print("=" * 60)
 
     print("\n[1/4] init robot")

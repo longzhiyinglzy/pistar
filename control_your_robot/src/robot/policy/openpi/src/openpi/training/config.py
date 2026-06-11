@@ -891,7 +891,7 @@ _CONFIGS = [
         project_name="pistar",
         model=pi0_config.Pi0Config(pi05=True, pistar=True, action_horizon=10, discrete_state_input=False),
         data=LeRobotLiberoDataConfig(
-            repo_id="vlm_data/toy_419_419r1_r2",
+            repo_id="vlm_data/toy_419_419r1_r2_r3",
             base_config=DataConfig(prompt_from_task=True),
             extra_delta_transform=False,
             adv_ind_dropout=False,
@@ -917,7 +917,7 @@ _CONFIGS = [
         project_name="pistar",
         model=pi0_config.Pi0Config(pi05=True, pistar=True, action_horizon=10, discrete_state_input=False),
         data=LeRobotLiberoDataConfig(
-            repo_id="vlm_data/white_426_426r1",
+            repo_id="vlm_data/white_426_100_r1_r3_r3new",
             base_config=DataConfig(prompt_from_task=True),
             extra_delta_transform=False,
             adv_ind_dropout=False,
@@ -928,8 +928,8 @@ _CONFIGS = [
         lr_schedule=_optimizer.CosineDecaySchedule(
             warmup_steps=1_00,
             peak_lr=2.5e-5,
-            decay_steps=30_000,
             decay_lr=2.5e-6,
+            decay_steps=30_000,
         ),
         optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
         ema_decay=0.999,

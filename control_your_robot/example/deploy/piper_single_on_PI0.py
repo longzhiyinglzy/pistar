@@ -20,6 +20,8 @@ joint_limits_rad = [
     (math.radians(-120), math.radians(120))    # joint6
 ]
 gripper_limit = [(0.0, 1.0)]
+GRIPPER_CLOSE_THRESHOLD = 0.5
+GRIPPER_CLOSE_OFFSET = 0.1
 
 def input_transform(data):
     """将机器人数据转换为模型输入格式"""
@@ -73,8 +75,10 @@ def output_transform(action):
         for i in range(6)
     ]
 
-    # 限制夹爪在安全范围内
+    # 限制夹爪在安全范围内。Piper 中 0 表示闭合，1 表示张开。
     gripper = clamp(action_7d[6], gripper_limit[0][0], gripper_limit[0][1])
+    if gripper <= GRIPPER_CLOSE_THRESHOLD:
+        gripper = clamp(gripper - GRIPPER_CLOSE_OFFSET, gripper_limit[0][0], gripper_limit[0][1])
 
     # 构建控制指令
     move_data = {
@@ -91,20 +95,26 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="PI0 单臂部署脚本")
 
     #toy
-    # parser.add_argument("--model-path", type=str, default="/app/checkpoint/white_plug/11000", help="checkpoint 根目录")
+    # parser.add_argument("--model-path", type=str, default="/app/checkpoint/toy_merge3/21000", help="checkpoint 根目录")
     # parser.add_argument("--task-name", type=str, default="Put these toys into the box", help="任务名称")
     # parser.add_argument("--train-config", type=str, default="toy_419_all_positive_infer", help="训练配置名")
 
 
     #plug
-    parser.add_argument("--model-path", type=str, default="/app/checkpoint/whiterollout1/16000", help="checkpoint 根目录")
+    parser.add_argument("--model-path", type=str, default="/app/checkpoint/white_426_100_r1_r3_r3new/24000", help="checkpoint 根目录")
     parser.add_argument("--task-name", type=str, default="put the white plug into the two-hole socket", help="任务名称")
     parser.add_argument("--train-config", type=str, default="pi05_star_white_plug_infer", help="训练配置名")
     #parser.add_argument("--train-config", type=str, default="piper_plug_task_teleop", help="训练配置名")
-    parser.add_argument("--max-step", type=int, default=160, help="单个 episode 最大步数")
+    parser.add_argument("--max-step", type=int, default=300, help="单个 episode 最大步数")
     parser.add_argument("--num-episode", type=int, default=50, help="episode 数量")
     parser.add_argument("--adv-ind", type=str, default=None, help="PiStar 配置使用的 adv_ind，例如 positive/negative；普通 pi05 会忽略")
+    parser.add_argument("--gripper-effort", type=int, default=500, help="夹爪力矩，范围 0-5000")
+    parser.add_argument("--gripper-close-threshold", type=float, default=0.5, help="模型夹爪输出小于等于该值时视为闭合")
+    parser.add_argument("--gripper-close-offset", type=float, default=0.1, help="闭合增强时从模型夹爪输出中减去的开度偏置")
     args = parser.parse_args()
+
+    GRIPPER_CLOSE_THRESHOLD = max(0.0, min(args.gripper_close_threshold, 1.0))
+    GRIPPER_CLOSE_OFFSET = max(0.0, min(args.gripper_close_offset, 1.0))
 
     # ========== 配置参数 ==========
     MODEL_PATH = args.model_path  # checkpoint 根目录（应包含 params/ 与 assets/）
@@ -125,6 +135,9 @@ if __name__ == "__main__":
     print("\n[1/3] 初始化机器人...")
     robot = PiperSingle()
     robot.set_up()
+    robot.controllers["arm"]["left_arm"].set_gripper_effort(args.gripper_effort)
+    print(f"夹爪力矩设置为: {robot.controllers['arm']['left_arm'].gripper_effort}")
+    print(f"夹爪闭合增强: output <= {GRIPPER_CLOSE_THRESHOLD} 时减小 {GRIPPER_CLOSE_OFFSET}")
     print("✓ 机器人初始化完成")
 
     # 加载模型

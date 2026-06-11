@@ -15,8 +15,8 @@ parquet 里的 `episode_index` 与全局 `index` 列。
 示例：
 1. 直接指定数据集目录:
    python scripts/delete_lerobot_episodes.py \
-       --dataset-root /app/dataset/rollout/white_rollout3 \
-       --episodes 12 15 16 57 80 82 90 99 103 117 127
+       --dataset-root /app/dataset/rollout/white_rollout3_new \
+       --episodes 12 16
 
 2. 兼容旧参数:
    python scripts/delete_lerobot_episodes.py \

@@ -18,6 +18,7 @@ class PiperController(ArmController):
         self.name = name
         self.controller_type = "user_controller"
         self.controller = None
+        self.gripper_effort = 1000
     
     def set_up(self, can:str):
         piper = C_PiperInterface_V2(can)
@@ -61,10 +62,13 @@ class PiperController(ArmController):
         self.controller.MotionCtrl_2(0x01, 0x01, int(speed_percent), 0x00)
         self.controller.JointCtrl(j1, j2, j3, j4, j5, j6)
 
+    def set_gripper_effort(self, effort):
+        self.gripper_effort = int(max(0, min(int(effort), 5000)))
+
     # The input gripper value is in the range [0, 1], representing the degree of opening.
     def set_gripper(self, gripper):
         gripper = int(gripper * 70 * 1000)
-        self.controller.GripperCtrl(gripper, 1000, 0x01, 0)
+        self.controller.GripperCtrl(gripper, self.gripper_effort, 0x01, 0)
 
     def __del__(self):
         try:
