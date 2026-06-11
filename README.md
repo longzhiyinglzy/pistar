@@ -315,3 +315,9 @@ python example/deploy/piper_single_on_PI0.py \
 ```
 
 For a regular `pi05` checkpoint, `--adv-ind` can be omitted. For a PiStar checkpoint, you need to pass in the condition expected by the training config; common values are `positive` or `negative`.
+
+## Questions and Feedback
+
+If you have any questions or encounter any issues, feel free to join our WeChat group for discussion.
+
+<img src=".\wechat_group.jpg" style="zoom:30%;" />
