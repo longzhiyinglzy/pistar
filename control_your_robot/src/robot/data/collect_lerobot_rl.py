@@ -13,7 +13,7 @@ import numpy as np
 import torch
 import cv2
 from pathlib import Path
-from lerobot.common.datasets.lerobot_dataset import LeRobotDataset
+from lerobot.common.datasets.lerobot_dataset import LeRobotDataset, LeRobotDatasetMetadata
 from robot.utils.base.data_handler import debug_print
 
 KEY_BANNED = ["timestamp"]
@@ -134,6 +134,41 @@ class CollectLeRobotRL:
         self.dataset_created = False
         gc.collect()
 
+    def _load_existing_dataset_for_append(self, output_path: Path) -> LeRobotDataset:
+        """Load only LeRobot metadata so appending does not rebuild HF Arrow caches.
+
+        LeRobotDataset(repo_id=..., root=...) loads every existing parquet file
+        through HuggingFace datasets. For a real robot rollout dataset this can
+        create a huge Arrow cache before a single new frame is collected. For
+        appending, we only need metadata plus an empty hf_dataset for the new
+        episode being written.
+        """
+        dataset = LeRobotDataset.__new__(LeRobotDataset)
+        dataset.repo_id = self.repo_id
+        dataset.root = output_path
+        dataset.revision = None
+        dataset.tolerance_s = 1e-4
+        dataset.image_writer = None
+        dataset.image_transforms = None
+        dataset.delta_timestamps = None
+        dataset.delta_indices = None
+        dataset.episodes = None
+        dataset.video_backend = None
+        dataset.episode_data_index = None
+        dataset.meta = LeRobotDatasetMetadata(
+            repo_id=self.repo_id,
+            root=output_path,
+            force_cache_sync=False,
+        )
+        dataset.hf_dataset = dataset.create_hf_dataset()
+        dataset.episode_buffer = dataset.create_episode_buffer()
+        if self.image_writer_processes or self.image_writer_threads:
+            dataset.start_image_writer(
+                num_processes=self.image_writer_processes,
+                num_threads=self.image_writer_threads,
+            )
+        return dataset
+
     def _get_dataset_feature_keys(self) -> set[str]:
         """返回当前数据集 schema 中的 feature key 集合。"""
         if self.dataset is None:
@@ -207,58 +242,25 @@ class CollectLeRobotRL:
         if output_path.exists() and (output_path / "meta").exists():
             debug_print("collect_lerobot_rl", f"检测到现有 LeRobot 数据集: {output_path}", "INFO")
 
-            # 【优化方案】Monkey patch 跳过耗时的 timestamp 检查
-            import lerobot.common.datasets.lerobot_dataset as lrd_module
-
-            original_check_timestamps_sync = lrd_module.check_timestamps_sync
-
-            # 临时禁用 timestamp 检查
-            def noop_check(*args, **kwargs):
-                pass
-
-            lrd_module.check_timestamps_sync = noop_check
-
-            # Patch torch.stack to fix compatibility issue
-            original_stack = torch.stack
-            def safe_stack(tensors, *args, **kwargs):
-                if not isinstance(tensors, (list, tuple)):
-                    try:
-                        tensors = list(tensors)
-                    except Exception:
-                        pass
-                if isinstance(tensors, list) and len(tensors) > 0 and isinstance(tensors[0], (int, float, np.number)):
-                    return torch.tensor(tensors)
-                return original_stack(tensors, *args, **kwargs)
-
-            torch.stack = safe_stack
-
             try:
-                debug_print("collect_lerobot_rl", f"开始快速加载（跳过 timestamp 验证）...", "INFO")
-
-                # 加载现有数据集（由于禁用了检查，会快很多）
-                self.dataset = LeRobotDataset(
-                    repo_id=self.repo_id,
-                    root=output_path,
+                debug_print(
+                    "collect_lerobot_rl",
+                    "开始轻量续写加载（只读取 meta，不加载旧 parquet / HF Arrow cache）...",
+                    "INFO",
                 )
+                self.dataset = self._load_existing_dataset_for_append(output_path)
                 self._sync_value_label_key_from_dataset()
-
-                # 启动 image writer
-                self.dataset.start_image_writer(
-                    num_processes=self.image_writer_processes,
-                    num_threads=self.image_writer_threads,
+                debug_print(
+                    "collect_lerobot_rl",
+                    f"✓ 数据集轻量续写准备成功（当前有 {self.dataset.num_episodes} 个 episodes）",
+                    "INFO",
                 )
-
-                debug_print("collect_lerobot_rl", f"✓ 数据集加载成功（快速模式，当前有 {self.dataset.num_episodes} 个 episodes）", "INFO")
 
             except Exception as e:
                 debug_print("collect_lerobot_rl", f"加载数据集失败: {e}", "ERROR")
                 import traceback
                 debug_print("collect_lerobot_rl", f"详细错误:\n{traceback.format_exc()}", "ERROR")
                 raise
-            finally:
-                # 恢复原始函数
-                lrd_module.check_timestamps_sync = original_check_timestamps_sync
-                torch.stack = original_stack
         else:
             debug_print("collect_lerobot_rl", f"创建新的 LeRobot 数据集: {output_path}", "INFO")
 
