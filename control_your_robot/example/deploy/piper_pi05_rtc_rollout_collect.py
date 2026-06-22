@@ -9,6 +9,7 @@ Typical use:
        s / Right arrow: save success
        f: save failure
        r / Left arrow: discard
+       Enter: discard by default, configurable with --enter-label
        q / Esc: quit
 
 The saved frames are autonomous policy frames, so ``intervention`` is always 0.
@@ -154,7 +155,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--action-horizon", type=int, default=50)
     parser.add_argument("--max-step", type=int, default=450)
     parser.add_argument("--timeout-label", choices=["success", "failure", "discard"], default="failure")
-    parser.add_argument("--enter-label", choices=["success", "failure", "discard"], default="success")
+    parser.add_argument("--enter-label", choices=["success", "failure", "discard"], default="discard")
+    parser.add_argument(
+        "--min-save-frames",
+        type=int,
+        default=30,
+        help="Discard any non-empty episode shorter than this many frames. Set to 1 to disable.",
+    )
     parser.add_argument("--save-adv-ind", default="none")
     parser.add_argument("--penalty-value", type=float, default=-1.0)
     parser.add_argument("--failure-terminal-reward-label", type=float, default=-1.0)
@@ -217,6 +224,8 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError("--action-horizon must be positive.")
     if args.max_step < 0:
         raise ValueError("--max-step must be non-negative.")
+    if args.min_save_frames < 1:
+        raise ValueError("--min-save-frames must be at least 1.")
     if args.rtc_execution_horizon < 0:
         raise ValueError("--rtc-execution-horizon must be non-negative.")
     if args.rtc_prefetch_threshold < 1:
@@ -393,6 +402,17 @@ def save_or_discard(
     if frame_count == 0:
         print("[warn] empty episode, nothing to save.", flush=True)
         return outcome != "quit"
+
+    if outcome != "discard" and frame_count < args.min_save_frames:
+        robot.collection.clear_current_episode()
+        stats.add_discarded()
+        print(
+            f"[warn] episode has only {frame_count} frames, below --min-save-frames={args.min_save_frames}; "
+            "discarded instead of saving.",
+            flush=True,
+        )
+        print(stats.format_line(), flush=True)
+        return True
 
     if outcome == "discard":
         robot.collection.clear_current_episode()
