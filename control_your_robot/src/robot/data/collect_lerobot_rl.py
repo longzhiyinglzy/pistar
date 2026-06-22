@@ -8,6 +8,7 @@
 import sys
 sys.path.append("./")
 
+import gc
 import numpy as np
 import torch
 import cv2
@@ -41,6 +42,10 @@ class CollectLeRobotRL:
         move_check: bool = True,
         tolerance: float = 0.002,  
         penalty_value: float = -1.0,  # 失败时的惩罚值 (-c)
+        image_writer_processes: int = 5,
+        image_writer_threads: int = 10,
+        image_format: str = "png",
+        release_dataset_after_save: bool = False,
     ):
         """
         Args:
@@ -69,6 +74,10 @@ class CollectLeRobotRL:
         self.move_check = move_check
         self.tolerance = tolerance
         self.penalty_value = penalty_value
+        self.image_writer_processes = int(max(0, image_writer_processes))
+        self.image_writer_threads = int(max(0, image_writer_threads))
+        self.image_format = self._normalize_image_format(image_format)
+        self.release_dataset_after_save = bool(release_dataset_after_save)
 
         # 当前 episode 的数据缓存
         self.episode_buffer = []
@@ -81,6 +90,49 @@ class CollectLeRobotRL:
         self.dataset = None
         self.dataset_created = False
         self.value_label_key = VALUE_LABEL_KEY
+
+    @staticmethod
+    def _normalize_image_format(image_format: str) -> str:
+        normalized = str(image_format).strip().lower().lstrip(".")
+        if normalized == "jpeg":
+            normalized = "jpg"
+        if normalized not in {"png", "jpg"}:
+            raise ValueError(f"Unsupported image_format={image_format!r}; expected png or jpg.")
+        return normalized
+
+    def _patch_lerobot_image_format(self) -> None:
+        """Patch LeRobot temporary frame extension before image writer starts."""
+        if self.image_format == "png":
+            return
+        image_path_template = (
+            "images/{image_key}/episode_{episode_index:06d}/"
+            f"frame_{{frame_index:06d}}.{self.image_format}"
+        )
+        try:
+            import lerobot.common.datasets.utils as dataset_utils
+            import lerobot.common.datasets.lerobot_dataset as dataset_module
+
+            dataset_utils.DEFAULT_IMAGE_PATH = image_path_template
+            dataset_module.DEFAULT_IMAGE_PATH = image_path_template
+        except Exception as exc:
+            debug_print(
+                "collect_lerobot_rl",
+                f"Failed to patch LeRobot image format to {self.image_format}: {exc}",
+                "WARNING",
+            )
+
+    def _release_dataset_after_episode(self) -> None:
+        """Optionally release LeRobotDataset internals to avoid long-session RAM growth."""
+        if not self.release_dataset_after_save or self.dataset is None:
+            return
+        try:
+            if hasattr(self.dataset, "stop_image_writer"):
+                self.dataset.stop_image_writer()
+        except Exception as exc:
+            debug_print("collect_lerobot_rl", f"stop_image_writer failed: {exc}", "WARNING")
+        self.dataset = None
+        self.dataset_created = False
+        gc.collect()
 
     def _get_dataset_feature_keys(self) -> set[str]:
         """返回当前数据集 schema 中的 feature key 集合。"""
@@ -148,6 +200,7 @@ class CollectLeRobotRL:
         if self.dataset_created:
             return
 
+        self._patch_lerobot_image_format()
         output_path = self.output_dir / self.repo_id
 
         # 检查数据集是否已存在（必须有 meta 目录才算完整数据集）
@@ -191,8 +244,8 @@ class CollectLeRobotRL:
 
                 # 启动 image writer
                 self.dataset.start_image_writer(
-                    num_processes=5,
-                    num_threads=10,
+                    num_processes=self.image_writer_processes,
+                    num_threads=self.image_writer_threads,
                 )
 
                 debug_print("collect_lerobot_rl", f"✓ 数据集加载成功（快速模式，当前有 {self.dataset.num_episodes} 个 episodes）", "INFO")
@@ -265,8 +318,8 @@ class CollectLeRobotRL:
                 robot_type=self.robot_type,
                 fps=self.fps,
                 features=features,
-                image_writer_threads=10,
-                image_writer_processes=5,
+                image_writer_threads=self.image_writer_threads,
+                image_writer_processes=self.image_writer_processes,
             )
             self.value_label_key = VALUE_LABEL_KEY
             debug_print("collect_lerobot_rl", f"LeRobot 数据集创建成功", "INFO")
@@ -407,6 +460,8 @@ class CollectLeRobotRL:
         # 清空缓存
         self.episode_buffer = []
         self.intervention_flags = []
+        self.last_controller_data = None
+        self._release_dataset_after_episode()
 
     def clear_current_episode(self):
         """清空当前 episode 缓存（用于放弃不满意的数据）"""

@@ -297,6 +297,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--save-adv-ind", default="none")
     parser.add_argument("--penalty-value", type=float, default=-1.0)
     parser.add_argument("--failure-terminal-reward-label", type=float, default=-1.0)
+    parser.add_argument("--image-writer-processes", type=int, default=1)
+    parser.add_argument("--image-writer-threads", type=int, default=2)
+    parser.add_argument("--image-format", choices=["png", "jpg", "jpeg"], default="jpg")
+    parser.add_argument("--release-dataset-after-save", type=_bool_arg, default=True)
 
     parser.add_argument("--arm-can", default="can0")
     parser.add_argument("--arm-name", default="left_arm")
@@ -367,6 +371,10 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError("--min-save-frames must be at least 1.")
     if args.post_reset_sleep < 0:
         raise ValueError("--post-reset-sleep must be non-negative.")
+    if args.image_writer_processes < 0:
+        raise ValueError("--image-writer-processes must be non-negative.")
+    if args.image_writer_threads < 0:
+        raise ValueError("--image-writer-threads must be non-negative.")
     if args.rtc_execution_horizon < 0:
         raise ValueError("--rtc-execution-horizon must be non-negative.")
     if args.rtc_prefetch_threshold < 1:
@@ -420,6 +428,10 @@ def create_rl_collector(args: argparse.Namespace):
         move_check=bool(args.move_check),
         tolerance=0.0005,
         penalty_value=args.penalty_value,
+        image_writer_processes=args.image_writer_processes,
+        image_writer_threads=args.image_writer_threads,
+        image_format=args.image_format,
+        release_dataset_after_save=args.release_dataset_after_save,
     )
 
 
@@ -1066,6 +1078,12 @@ def run(args: argparse.Namespace) -> None:
     print(f"fps/control_dt: {args.fps} / {args.control_dt}", flush=True)
     print(
         f"cameras: head={args.cam_head_serial}, side={args.cam_side_serial or 'None'}, wrist={args.cam_wrist_serial}",
+        flush=True,
+    )
+    print(
+        f"save mode: image_format={args.image_format}, "
+        f"writer={args.image_writer_processes}p/{args.image_writer_threads}t, "
+        f"release_after_save={args.release_dataset_after_save}",
         flush=True,
     )
     print(f"RTC: enabled={rtc_cfg.enabled}, exec_horizon={rtc_cfg.execution_horizon}, delay={rtc_cfg.inference_delay_steps}", flush=True)
