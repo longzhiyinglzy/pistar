@@ -93,6 +93,39 @@ class ObservationSnapshot:
     captured_at: float = 0.0
 
 
+@dataclass
+class RolloutStats:
+    success: int = 0
+    failure: int = 0
+    discarded: int = 0
+
+    @property
+    def total_saved(self) -> int:
+        return self.success + self.failure
+
+    @property
+    def success_rate(self) -> float:
+        if self.total_saved == 0:
+            return 0.0
+        return 100.0 * float(self.success) / float(self.total_saved)
+
+    def add_saved(self, *, success: bool) -> None:
+        if success:
+            self.success += 1
+        else:
+            self.failure += 1
+
+    def add_discarded(self) -> None:
+        self.discarded += 1
+
+    def format_line(self, prefix: str = "[summary]") -> str:
+        return (
+            f"{prefix} saved_total={self.total_saved} "
+            f"success={self.success} failure={self.failure} "
+            f"success_rate={self.success_rate:.1f}% discarded={self.discarded}"
+        )
+
+
 def _bool_arg(value: str | bool) -> bool:
     if isinstance(value, bool):
         return value
@@ -210,6 +243,47 @@ def install_rl_collector(robot: PiperSingleLeRobot, args: argparse.Namespace) ->
     )
 
 
+def _to_scalar(value):
+    if isinstance(value, np.ndarray):
+        if value.size == 0:
+            return 0.0
+        return _to_scalar(value.reshape(-1)[0])
+    if isinstance(value, (list, tuple)):
+        if not value:
+            return 0.0
+        return _to_scalar(value[0])
+    if hasattr(value, "item"):
+        return value.item()
+    return value
+
+
+def load_existing_rollout_stats(dataset_dir: Path) -> RolloutStats:
+    stats = RolloutStats()
+    data_dir = dataset_dir / "data"
+    if not data_dir.exists():
+        return stats
+
+    try:
+        import pyarrow.parquet as pq
+    except Exception as exc:
+        print(f"[warn] could not import pyarrow to count existing episodes: {exc}", flush=True)
+        return stats
+
+    for parquet_path in sorted(data_dir.glob("chunk-*/episode_*.parquet")):
+        try:
+            table = pq.read_table(parquet_path, columns=["reward"])
+            if table.num_rows == 0:
+                continue
+            final_reward = float(_to_scalar(table["reward"].to_pylist()[-1]))
+        except Exception as exc:
+            print(f"[warn] skip existing episode count for {parquet_path}: {exc}", flush=True)
+            continue
+
+        stats.add_saved(success=final_reward > 0.5)
+
+    return stats
+
+
 def _get_color_image(sensors: dict, *keys: str) -> np.ndarray | None:
     for key in keys:
         cam_data = sensors.get(key)
@@ -309,7 +383,12 @@ def outcome_from_key(key: str | None, *, enter_label: str) -> str | None:
     return None
 
 
-def save_or_discard(robot: PiperSingleLeRobot, outcome: str, args: argparse.Namespace) -> bool:
+def save_or_discard(
+    robot: PiperSingleLeRobot,
+    outcome: str,
+    args: argparse.Namespace,
+    stats: RolloutStats,
+) -> bool:
     frame_count = len(robot.collection.episode_buffer)
     if frame_count == 0:
         print("[warn] empty episode, nothing to save.", flush=True)
@@ -317,7 +396,9 @@ def save_or_discard(robot: PiperSingleLeRobot, outcome: str, args: argparse.Name
 
     if outcome == "discard":
         robot.collection.clear_current_episode()
+        stats.add_discarded()
         print(f"[episode] discarded {frame_count} frames", flush=True)
+        print(stats.format_line(), flush=True)
         return True
 
     success = outcome == "success"
@@ -331,6 +412,8 @@ def save_or_discard(robot: PiperSingleLeRobot, outcome: str, args: argparse.Name
         f"intervention=0, adv_ind={args.save_adv_ind}",
         flush=True,
     )
+    stats.add_saved(success=success)
+    print(stats.format_line(), flush=True)
     return True
 
 
@@ -682,6 +765,8 @@ def run(args: argparse.Namespace) -> None:
     args.gripper_close_offset = float(np.clip(args.gripper_close_offset, 0.0, 1.0))
     prompt = args.instruction if args.instruction else args.task_name
     rtc_cfg = build_rtc_config(args)
+    dataset_path = Path(args.output_dir) / args.repo_id
+    rollout_stats = load_existing_rollout_stats(dataset_path)
 
     robot = PiperSingleLeRobot(
         repo_id=args.repo_id,
@@ -706,10 +791,11 @@ def run(args: argparse.Namespace) -> None:
     print(f"server: ws://{args.server_host}:{args.server_port}", flush=True)
     print(f"prompt: {prompt}", flush=True)
     print(f"inference adv_ind: {args.adv_ind if args.adv_ind is not None else 'None'}", flush=True)
-    print(f"save dataset: {Path(args.output_dir) / args.repo_id}", flush=True)
+    print(f"save dataset: {dataset_path}", flush=True)
     print(f"fps/control_dt: {args.fps} / {args.control_dt}", flush=True)
     print(f"RTC: enabled={rtc_cfg.enabled}, exec_horizon={rtc_cfg.execution_horizon}, delay={rtc_cfg.inference_delay_steps}", flush=True)
     print("keys during rollout: s=success, f=failure, r=discard, q=quit", flush=True)
+    print(rollout_stats.format_line(prefix="[existing]"), flush=True)
     print("=" * 72, flush=True)
 
     try:
@@ -825,9 +911,10 @@ def run(args: argparse.Namespace) -> None:
             if outcome == "quit":
                 break
             print(f"[episode] collected policy frames={policy_frames}", flush=True)
-            if not save_or_discard(robot, outcome, args):
+            if not save_or_discard(robot, outcome, args, rollout_stats):
                 break
 
+        print(rollout_stats.format_line(prefix="[done summary]"), flush=True)
         print(f"\n[done] dataset path: {robot.collection.get_dataset_path()}", flush=True)
     finally:
         keyboard.close()
