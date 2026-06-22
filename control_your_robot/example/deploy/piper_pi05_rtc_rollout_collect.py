@@ -21,22 +21,25 @@ from __future__ import annotations
 
 import argparse
 import enum
+import importlib.util
 import logging
 import math
+import os
+import select
 import sys
+import termios
 import threading
 import time
+import tty
 from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
 
 
-CONTROL_YOUR_ROBOT_ROOT = Path(__file__).resolve().parents[2]
-OPENPI_ROOT = CONTROL_YOUR_ROBOT_ROOT / "src" / "robot" / "policy" / "openpi"
+LOCAL_CONTROL_YOUR_ROBOT_ROOT = Path(__file__).resolve().parents[2]
+OPENPI_ROOT = LOCAL_CONTROL_YOUR_ROBOT_ROOT / "src" / "robot" / "policy" / "openpi"
 for path in (
-    CONTROL_YOUR_ROBOT_ROOT,
-    CONTROL_YOUR_ROBOT_ROOT / "src",
     OPENPI_ROOT,
     OPENPI_ROOT / "src",
     OPENPI_ROOT / "packages" / "openpi-client" / "src",
@@ -45,10 +48,7 @@ for path in (
     if path_str not in sys.path:
         sys.path.insert(0, path_str)
 
-from my_robot.piper_single_lerobot import PiperSingleLeRobot  # noqa: E402
 from openpi_client import image_tools, websocket_client_policy  # noqa: E402
-from robot.controller.spacemouse_piper_utils import KeyboardPoller  # noqa: E402
-from robot.data.collect_lerobot_rl import CollectLeRobotRL  # noqa: E402
 
 
 JOINT_LIMITS_RAD = [
@@ -60,6 +60,18 @@ JOINT_LIMITS_RAD = [
     (math.radians(-120), math.radians(120)),
 ]
 GRIPPER_LIMIT = (0.0, 1.0)
+DEFAULT_CONTROL_REPO_PATH = "/home/user/code/control_your_robot"
+DEFAULT_RESET_JOINT = [
+    0.04092797,
+    1.34207091,
+    -0.73867569,
+    0.02720968,
+    1.13512722,
+    0.29129545,
+]
+DEFAULT_CAM_HEAD_SERIAL = "323522063521"
+DEFAULT_CAM_SIDE_SERIAL = "349222061138"
+DEFAULT_CAM_WRIST_SERIAL = "409122272461"
 
 
 class RTCAttentionSchedule(enum.Enum):
@@ -127,6 +139,111 @@ class RolloutStats:
         )
 
 
+@dataclass
+class ExternalPiperRuntime:
+    controller: object
+    cam_head: object
+    cam_wrist: object
+    cam_side: object | None
+
+
+class KeyboardPoller:
+    """Small non-blocking keyboard reader for episode commands."""
+
+    def __init__(self) -> None:
+        self._fd: int | None = None
+        self._old_attrs: list | None = None
+        self._owns_fd = False
+
+        try:
+            self._fd = os.open("/dev/tty", os.O_RDONLY | os.O_NONBLOCK)
+            self._owns_fd = True
+        except Exception:
+            if sys.stdin.isatty():
+                self._fd = sys.stdin.fileno()
+
+        if self._fd is None:
+            return
+
+        try:
+            self._old_attrs = termios.tcgetattr(self._fd)
+            tty.setcbreak(self._fd)
+        except Exception:
+            self.close()
+
+    @property
+    def available(self) -> bool:
+        return self._fd is not None
+
+    def read_key(self) -> str | None:
+        if self._fd is None:
+            return None
+
+        ready, _, _ = select.select([self._fd], [], [], 0)
+        if not ready:
+            return None
+
+        try:
+            data = os.read(self._fd, 1)
+        except BlockingIOError:
+            return None
+        if not data:
+            return None
+
+        if data == b"\x1b":
+            seq = b""
+            deadline = time.monotonic() + 0.02
+            while time.monotonic() < deadline and len(seq) < 2:
+                ready, _, _ = select.select([self._fd], [], [], max(0.0, deadline - time.monotonic()))
+                if not ready:
+                    break
+                try:
+                    seq += os.read(self._fd, 2 - len(seq))
+                except BlockingIOError:
+                    break
+
+            arrows = {
+                b"[A": "up",
+                b"[B": "down",
+                b"[C": "right",
+                b"[D": "left",
+            }
+            if seq in arrows:
+                return arrows[seq]
+            return "esc"
+
+        return data.decode("utf-8", errors="ignore").lower() or None
+
+    def drain(self) -> None:
+        if self._fd is None:
+            return
+        while True:
+            ready, _, _ = select.select([self._fd], [], [], 0)
+            if not ready:
+                return
+            try:
+                data = os.read(self._fd, 64)
+            except BlockingIOError:
+                return
+            if not data:
+                return
+
+    def close(self) -> None:
+        if self._fd is not None and self._old_attrs is not None:
+            try:
+                termios.tcsetattr(self._fd, termios.TCSADRAIN, self._old_attrs)
+            except Exception:
+                pass
+        if self._fd is not None and self._owns_fd:
+            try:
+                os.close(self._fd)
+            except Exception:
+                pass
+        self._fd = None
+        self._old_attrs = None
+        self._owns_fd = False
+
+
 def _bool_arg(value: str | bool) -> bool:
     if isinstance(value, bool):
         return value
@@ -138,9 +255,24 @@ def _bool_arg(value: str | bool) -> bool:
     raise argparse.ArgumentTypeError(f"expected a boolean value, got: {value!r}")
 
 
+def _parse_csv_floats(value: str, *, expected: int, name: str) -> list[float]:
+    try:
+        parsed = [float(part.strip()) for part in value.split(",") if part.strip()]
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"--{name} must be comma-separated floats") from exc
+    if len(parsed) != expected:
+        raise argparse.ArgumentTypeError(f"--{name} expects {expected} values, got {len(parsed)}")
+    return parsed
+
+
+def _reset_joint_arg(value: str) -> list[float]:
+    return _parse_csv_floats(value, expected=6, name="reset-joint")
+
+
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
 
+    parser.add_argument("--control-repo-path", default=DEFAULT_CONTROL_REPO_PATH)
     parser.add_argument("--server-host", default="localhost")
     parser.add_argument("--server-port", type=int, default=8000)
     parser.add_argument("--task-name", default="Pick up the block1 and assemble it.")
@@ -167,12 +299,19 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--failure-terminal-reward-label", type=float, default=-1.0)
 
     parser.add_argument("--arm-can", default="can0")
+    parser.add_argument("--arm-name", default="left_arm")
     parser.add_argument("--state-source", choices=["joint", "qpos"], default="joint")
+    parser.add_argument("--cam-head-serial", default=DEFAULT_CAM_HEAD_SERIAL)
+    parser.add_argument("--cam-side-serial", default=DEFAULT_CAM_SIDE_SERIAL)
+    parser.add_argument("--cam-wrist-serial", default=DEFAULT_CAM_WRIST_SERIAL)
     parser.add_argument("--no-reset-before-episode", action="store_true")
+    parser.add_argument("--reset-joint", type=_reset_joint_arg, default=list(DEFAULT_RESET_JOINT))
+    parser.add_argument("--post-reset-sleep", type=float, default=2.0)
     parser.add_argument("--reset-gripper", type=float, default=0.0)
     parser.add_argument("--gripper-effort", type=int, default=1000)
     parser.add_argument("--gripper-close-threshold", type=float, default=0.5)
-    parser.add_argument("--gripper-close-offset", type=float, default=0.1)
+    parser.add_argument("--gripper-close-offset", type=float, default=0.0)
+    parser.add_argument("--clip-joint-action", action="store_true")
     parser.add_argument(
         "--move-check",
         action="store_true",
@@ -226,6 +365,8 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError("--max-step must be non-negative.")
     if args.min_save_frames < 1:
         raise ValueError("--min-save-frames must be at least 1.")
+    if args.post_reset_sleep < 0:
+        raise ValueError("--post-reset-sleep must be non-negative.")
     if args.rtc_execution_horizon < 0:
         raise ValueError("--rtc-execution-horizon must be non-negative.")
     if args.rtc_prefetch_threshold < 1:
@@ -234,22 +375,102 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError("--rtc-inference-delay-steps must be non-negative.")
 
 
-def install_rl_collector(robot: PiperSingleLeRobot, args: argparse.Namespace) -> None:
-    base_collection = robot.collection
-    robot.collection = CollectLeRobotRL(
+def setup_control_repo(control_repo_path: str) -> Path:
+    repo_root = Path(control_repo_path).expanduser().resolve()
+    src_root = repo_root / "src"
+    if not repo_root.exists():
+        raise FileNotFoundError(f"control repo not found: {repo_root}")
+    if not src_root.exists():
+        raise FileNotFoundError(f"control repo src not found: {src_root}")
+
+    for path in (src_root, repo_root):
+        path_str = str(path)
+        if path_str in sys.path:
+            sys.path.remove(path_str)
+        sys.path.insert(0, path_str)
+    return repo_root
+
+
+def load_local_rl_collector_class():
+    collector_path = LOCAL_CONTROL_YOUR_ROBOT_ROOT / "src" / "robot" / "data" / "collect_lerobot_rl.py"
+    spec = importlib.util.spec_from_file_location("pistar_collect_lerobot_rl", collector_path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Could not load RL collector from: {collector_path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.CollectLeRobotRL
+
+
+def create_rl_collector(args: argparse.Namespace):
+    collect_lerobot_rl = load_local_rl_collector_class()
+    return collect_lerobot_rl(
         repo_id=args.repo_id,
         output_dir=args.output_dir,
         task_name=args.task_name,
         fps=args.fps,
-        robot_type=base_collection.robot_type,
-        state_dim=base_collection.state_dim,
-        action_dim=base_collection.action_dim,
-        image_size=base_collection.image_size,
-        camera_keys=base_collection.camera_keys,
+        robot_type="piper",
+        state_dim=7,
+        action_dim=7,
+        image_size=(480, 640),
+        camera_keys={
+            "cam_head": "image",
+            "cam_wrist": "wrist_image",
+            "cam_side": "side_image",
+        },
         move_check=bool(args.move_check),
-        tolerance=base_collection.tolerance,
+        tolerance=0.0005,
         penalty_value=args.penalty_value,
     )
+
+
+def create_external_runtime(args: argparse.Namespace) -> ExternalPiperRuntime:
+    setup_control_repo(args.control_repo_path)
+
+    try:
+        from robot.controller.Piper_controller import PiperController
+        from robot.sensor.Realsense_sensor import RealsenseSensor
+    except Exception as exc:
+        raise ImportError(
+            f"Failed to import Piper runtime modules from {args.control_repo_path}. "
+            "Check piper_sdk, pyrealsense2, and control_your_robot installation."
+        ) from exc
+
+    controller = PiperController(args.arm_name)
+    controller.set_up(args.arm_can)
+    if hasattr(controller, "set_gripper_effort"):
+        controller.set_gripper_effort(args.gripper_effort)
+
+    cam_head = RealsenseSensor("cam_head")
+    cam_wrist = RealsenseSensor("cam_wrist")
+    cam_side = RealsenseSensor("cam_side") if args.cam_side_serial else None
+
+    cam_head.set_up(args.cam_head_serial)
+    cam_wrist.set_up(args.cam_wrist_serial)
+    if cam_side is not None:
+        cam_side.set_up(args.cam_side_serial)
+
+    cam_head.set_collect_info(["color"])
+    cam_wrist.set_collect_info(["color"])
+    if cam_side is not None:
+        cam_side.set_collect_info(["color"])
+
+    return ExternalPiperRuntime(
+        controller=controller,
+        cam_head=cam_head,
+        cam_wrist=cam_wrist,
+        cam_side=cam_side,
+    )
+
+
+def cleanup_external_runtime(runtime: ExternalPiperRuntime | None) -> None:
+    if runtime is None:
+        return
+    for sensor in (runtime.cam_head, runtime.cam_wrist, runtime.cam_side):
+        if sensor is not None and hasattr(sensor, "cleanup"):
+            try:
+                sensor.cleanup()
+            except Exception:
+                pass
 
 
 def _to_scalar(value):
@@ -342,13 +563,13 @@ def make_observation(
     )
 
 
-def output_transform(action: np.ndarray, args: argparse.Namespace) -> dict:
+def action_to_targets(action: np.ndarray, args: argparse.Namespace) -> tuple[np.ndarray, float]:
     action7 = np.asarray(action, dtype=np.float64).reshape(-1)[:7]
     if action7.shape[0] < 7:
         raise ValueError(f"expected at least 7D action, got shape={action7.shape}")
 
     target6 = action7[:6]
-    if args.state_source == "joint":
+    if args.state_source == "joint" and args.clip_joint_action:
         target6 = np.asarray(
             [
                 np.clip(float(target6[i]), JOINT_LIMITS_RAD[i][0], JOINT_LIMITS_RAD[i][1])
@@ -357,10 +578,46 @@ def output_transform(action: np.ndarray, args: argparse.Namespace) -> dict:
             dtype=np.float64,
         )
     gripper = float(np.clip(action7[6], GRIPPER_LIMIT[0], GRIPPER_LIMIT[1]))
-    if gripper <= args.gripper_close_threshold:
+    if args.gripper_close_offset > 0 and gripper <= args.gripper_close_threshold:
         gripper = float(np.clip(gripper - args.gripper_close_offset, GRIPPER_LIMIT[0], GRIPPER_LIMIT[1]))
 
-    return {"arm": {"left_arm": {args.state_source: target6.tolist(), "gripper": gripper}}}
+    return target6, gripper
+
+
+def execute_action(runtime: ExternalPiperRuntime, action: np.ndarray, args: argparse.Namespace) -> None:
+    target6, target_gripper = action_to_targets(action, args)
+    if args.state_source == "joint":
+        runtime.controller.set_joint(target6)
+    else:
+        runtime.controller.set_position(target6)
+    runtime.controller.set_gripper(target_gripper)
+
+
+def reset_runtime(runtime: ExternalPiperRuntime, args: argparse.Namespace) -> None:
+    reset_joint = np.asarray(args.reset_joint, dtype=np.float64)
+    if reset_joint.shape != (6,):
+        raise ValueError(f"--reset-joint must be length 6, got {reset_joint.shape}")
+    runtime.controller.reset(reset_joint, gripper=float(args.reset_gripper))
+    if args.post_reset_sleep > 0:
+        time.sleep(args.post_reset_sleep)
+
+
+def get_runtime_data(runtime: ExternalPiperRuntime) -> list[dict]:
+    arm_state = runtime.controller.get_state()
+    controller_data = {
+        "left_arm": {
+            "joint": np.asarray(arm_state["joint"], dtype=np.float64),
+            "qpos": np.asarray(arm_state["qpos"], dtype=np.float64),
+            "gripper": float(arm_state["gripper"]),
+        }
+    }
+    sensor_data = {
+        "cam_head": runtime.cam_head.get_image(),
+        "cam_wrist": runtime.cam_wrist.get_image(),
+    }
+    if runtime.cam_side is not None:
+        sensor_data["cam_side"] = runtime.cam_side.get_image()
+    return [controller_data, sensor_data]
 
 
 def wait_for_start(keyboard: KeyboardPoller, episode_idx: int, total: int) -> str:
@@ -393,18 +650,18 @@ def outcome_from_key(key: str | None, *, enter_label: str) -> str | None:
 
 
 def save_or_discard(
-    robot: PiperSingleLeRobot,
+    collector,
     outcome: str,
     args: argparse.Namespace,
     stats: RolloutStats,
 ) -> bool:
-    frame_count = len(robot.collection.episode_buffer)
+    frame_count = len(collector.episode_buffer)
     if frame_count == 0:
         print("[warn] empty episode, nothing to save.", flush=True)
         return outcome != "quit"
 
     if outcome != "discard" and frame_count < args.min_save_frames:
-        robot.collection.clear_current_episode()
+        collector.clear_current_episode()
         stats.add_discarded()
         print(
             f"[warn] episode has only {frame_count} frames, below --min-save-frames={args.min_save_frames}; "
@@ -415,14 +672,14 @@ def save_or_discard(
         return True
 
     if outcome == "discard":
-        robot.collection.clear_current_episode()
+        collector.clear_current_episode()
         stats.add_discarded()
         print(f"[episode] discarded {frame_count} frames", flush=True)
         print(stats.format_line(), flush=True)
         return True
 
     success = outcome == "success"
-    robot.collection.save_episode(
+    collector.save_episode(
         success=success,
         adv_ind_value=args.save_adv_ind,
         failure_terminal_reward_label=args.failure_terminal_reward_label,
@@ -788,15 +1045,8 @@ def run(args: argparse.Namespace) -> None:
     dataset_path = Path(args.output_dir) / args.repo_id
     rollout_stats = load_existing_rollout_stats(dataset_path)
 
-    robot = PiperSingleLeRobot(
-        repo_id=args.repo_id,
-        output_dir=args.output_dir,
-        task_name=args.task_name,
-        fps=args.fps,
-        move_check=bool(args.move_check),
-        arm_can=args.arm_can,
-    )
-    install_rl_collector(robot, args)
+    collector = None
+    runtime: ExternalPiperRuntime | None = None
     keyboard = KeyboardPoller()
 
     chunk_client = OpenPiChunkClient(
@@ -808,11 +1058,16 @@ def run(args: argparse.Namespace) -> None:
 
     print("=" * 72, flush=True)
     print("Autonomous pi0.5/PiStar RTC rollout collection", flush=True)
+    print(f"control repo: {Path(args.control_repo_path).expanduser().resolve()}", flush=True)
     print(f"server: ws://{args.server_host}:{args.server_port}", flush=True)
     print(f"prompt: {prompt}", flush=True)
     print(f"inference adv_ind: {args.adv_ind if args.adv_ind is not None else 'None'}", flush=True)
     print(f"save dataset: {dataset_path}", flush=True)
     print(f"fps/control_dt: {args.fps} / {args.control_dt}", flush=True)
+    print(
+        f"cameras: head={args.cam_head_serial}, side={args.cam_side_serial or 'None'}, wrist={args.cam_wrist_serial}",
+        flush=True,
+    )
     print(f"RTC: enabled={rtc_cfg.enabled}, exec_horizon={rtc_cfg.execution_horizon}, delay={rtc_cfg.inference_delay_steps}", flush=True)
     print("keys during rollout: s=success, f=failure, r=discard, q=quit", flush=True)
     print(rollout_stats.format_line(prefix="[existing]"), flush=True)
@@ -820,8 +1075,8 @@ def run(args: argparse.Namespace) -> None:
 
     try:
         print("[1/3] init robot", flush=True)
-        robot.set_up()
-        robot.controllers["arm"]["left_arm"].set_gripper_effort(args.gripper_effort)
+        runtime = create_external_runtime(args)
+        collector = create_rl_collector(args)
 
         print("[2/3] connect policy server", flush=True)
         server_metadata = chunk_client.get_server_metadata()
@@ -833,9 +1088,8 @@ def run(args: argparse.Namespace) -> None:
         for episode_idx in range(1, args.num_episode + 1):
             if not args.no_reset_before_episode:
                 print("[reset] moving to reset joint position", flush=True)
-                robot.reset()
-                time.sleep(1.0)
-                robot.move({"arm": {"left_arm": {"gripper": float(args.reset_gripper)}}})
+                reset_runtime(runtime, args)
+                keyboard.drain()
 
             command = wait_for_start(keyboard, episode_idx, args.num_episode)
             if command == "quit":
@@ -857,7 +1111,7 @@ def run(args: argparse.Namespace) -> None:
                     if outcome is not None:
                         break
 
-                    robot_data = robot.get()
+                    robot_data = get_runtime_data(runtime)
                     obs = make_observation(
                         robot_data,
                         state_source=args.state_source,
@@ -892,13 +1146,13 @@ def run(args: argparse.Namespace) -> None:
                         else:
                             raise ValueError(msg)
                     else:
-                        robot.move(output_transform(action, args))
+                        execute_action(runtime, action, args)
 
-                    robot.collection.collect(robot_data[0], robot_data[1], is_intervention=False)
+                    collector.collect(robot_data[0], robot_data[1], is_intervention=False)
                     policy_frames += 1
                     frames_since_status += 1
 
-                    if args.max_step > 0 and len(robot.collection.episode_buffer) >= args.max_step:
+                    if args.max_step > 0 and len(collector.episode_buffer) >= args.max_step:
                         outcome = args.timeout_label
                         print(f"\n[episode] max step reached -> {outcome}", flush=True)
                         break
@@ -909,7 +1163,7 @@ def run(args: argparse.Namespace) -> None:
                         latency = rtc_policy.last_latency_s
                         latency_str = "None" if latency is None else f"{latency * 1000.0:.1f}ms"
                         print(
-                            f"[rollout] frames={len(robot.collection.episode_buffer)} "
+                            f"[rollout] frames={len(collector.episode_buffer)} "
                             f"rate={frames_since_status / elapsed:.1f}Hz "
                             f"queue={rtc_policy.queue.size()} "
                             f"latency={latency_str} delay={rtc_policy.last_inference_delay_steps}",
@@ -931,13 +1185,15 @@ def run(args: argparse.Namespace) -> None:
             if outcome == "quit":
                 break
             print(f"[episode] collected policy frames={policy_frames}", flush=True)
-            if not save_or_discard(robot, outcome, args, rollout_stats):
+            if not save_or_discard(collector, outcome, args, rollout_stats):
                 break
 
         print(rollout_stats.format_line(prefix="[done summary]"), flush=True)
-        print(f"\n[done] dataset path: {robot.collection.get_dataset_path()}", flush=True)
+        if collector is not None:
+            print(f"\n[done] dataset path: {collector.get_dataset_path()}", flush=True)
     finally:
         keyboard.close()
+        cleanup_external_runtime(runtime)
 
 
 def main() -> None:
