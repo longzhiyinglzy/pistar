@@ -287,6 +287,8 @@ def create_train_state(
     warmup_steps: int | None = None,
     grad_clip_norm: float = 1.0,
     freeze_mode: str = "all_backbones",
+    siglip_checkpoint_path: str | None = None,
+    gemma_checkpoint_dir: str | None = None,
 ) -> tuple[TrainState, optax.GradientTransformation, optax.Schedule]:
     """创建训练状态。"""
     model = config.create(rng)
@@ -294,7 +296,11 @@ def create_train_state(
 
     if load_pretrained:
         logging.info(console.info("加载 SigLIP + Gemma3-270M 预训练权重..."))
-        loader = ValueModelWeightLoader()
+        loader = ValueModelWeightLoader(
+            gemma_variant=config.gemma_variant,
+            siglip_path=siglip_checkpoint_path,
+            gemma_checkpoint_dir=gemma_checkpoint_dir,
+        )
         params_dict = params.to_pure_dict()
         loaded_params = loader.load(params_dict)
         params.replace_by_pure_dict(loaded_params)
@@ -487,6 +493,8 @@ def main():
     parser.add_argument("--siglip_variant", type=str, default="So400m/14", help="SigLIP 变体")
     parser.add_argument("--fsdp_devices", type=int, default=1, help="FSDP设备数量，>1启用模型并行")
     parser.add_argument("--load_pretrained", action="store_true", help="加载 PaliGemma 预训练权重")
+    parser.add_argument("--siglip_checkpoint_path", type=str, default=None, help="可选的 SigLIP JAX .npz checkpoint 路径")
+    parser.add_argument("--gemma_checkpoint_dir", type=str, default=None, help="可选的 Gemma3 Orbax/JAX checkpoint 目录")
     parser.add_argument("--resume_from_checkpoint", type=str, default=None, help="从指定checkpoint恢复训练（例如：step_00001000）")
     parser.add_argument("--pyarrow_num_threads", type=int, default=0, help="PyArrow 读取并行线程数，0表示不设置")
     parser.add_argument("--tokenizer_path", type=str, default=None, help="可选的 Gemma3 tokenizer.model 本地路径")
@@ -691,6 +699,8 @@ def main():
         warmup_steps=args.warmup_steps,
         grad_clip_norm=args.grad_clip_norm,
         freeze_mode=args.freeze_mode,
+        siglip_checkpoint_path=args.siglip_checkpoint_path,
+        gemma_checkpoint_dir=args.gemma_checkpoint_dir,
     )
     logging.info("\033[1;32m模型初始化完成\033[0m")
     

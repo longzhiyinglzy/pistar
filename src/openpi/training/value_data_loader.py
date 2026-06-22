@@ -127,8 +127,10 @@ class ValueDataset(TorchDataset):
         import os
         import sys
 
-        gemma_path = os.path.join(os.path.dirname(__file__), "../../../gemma")
+        gemma_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../..", "gemma"))
         sys.path.insert(0, gemma_path)
+        if "gemma" in sys.modules and getattr(sys.modules["gemma"], "__file__", None) is None:
+            del sys.modules["gemma"]
 
         from gemma.gm.text._tokenizer import Gemma3Tokenizer
 
@@ -199,6 +201,15 @@ class ValueDataset(TorchDataset):
         else:
             wrist_image = self._zero_image
 
+        side_raw = row.get("side_image", None)
+        has_side = side_raw is not None
+        if has_side and isinstance(side_raw, float) and np.isnan(side_raw):
+            has_side = False
+        if has_side:
+            side_image = self._load_image(side_raw)
+        else:
+            side_image = self._zero_image
+
         # 获取任务文本
         task_index = int(row["task_index"])
         task_text = self.task_texts.get(task_index, "unknown task")
@@ -227,6 +238,8 @@ class ValueDataset(TorchDataset):
 
         result["image"]["wrist_0_rgb"] = wrist_image
         result["image_mask"]["wrist_0_rgb"] = has_wrist
+        result["image"]["right_wrist_0_rgb"] = side_image
+        result["image_mask"]["right_wrist_0_rgb"] = has_side
 
         return result
 

@@ -11,17 +11,17 @@ from robot.sensor.Realsense_sensor import RealsenseSensor
 
 from robot.data.collect_any import CollectAny
 
-# Define start position (in degrees)
+# Define start position (in radians)
 START_POSITION_ANGLE_LEFT_ARM = [
-    0,   # Joint 1
-    -0.4208,    # Joint 2
-    0.0324,  # Joint 3
-    0.0780,   # Joint 4
-    0.3558,  # Joint 5
-    0.0078,    # Joint 6
+    0.04092797,   # Joint 1
+    1.34207091,   # Joint 2
+    -0.73867569,  # Joint 3
+    0.02720968,   # Joint 4
+    1.13512722,   # Joint 5
+    0.29129545,   # Joint 6
 ]
 
-# Define start position (in degrees)
+# Define start position (in radians)
 START_POSITION_ANGLE_RIGHT_ARM = [
     0,   # Joint 1
     0,    # Joint 2
@@ -57,6 +57,8 @@ class PiperSingle(Robot):
                 "cam_wrist": RealsenseSensor("cam_wrist"),
             },
         }
+        if "side" in self.camera_serials:
+            self.sensors["image"]["cam_side"] = RealsenseSensor("cam_side")
 
     # ============== init ==============
     def reset(self):
@@ -68,6 +70,8 @@ class PiperSingle(Robot):
         self.controllers["arm"]["left_arm"].set_up("can1")
         self.sensors["image"]["cam_head"].set_up(self.camera_serials["head"])
         self.sensors["image"]["cam_wrist"].set_up(self.camera_serials["wrist"])
+        if "side" in self.camera_serials:
+            self.sensors["image"]["cam_side"].set_up(self.camera_serials["side"])
 
         self.set_collect_type({"arm": ["joint","qpos","gripper"],
                                "image": ["color"]

@@ -122,6 +122,26 @@ class ValueInputs(transforms.DataTransformFn):
             "observation/wrist_image_right",
             "observation.wrist_image_right",
         ]
+        right_wrist_candidates = [
+            "side_image",
+            "right_wrist_image",
+            "observation/side_image",
+            "observation.side_image",
+            "observation/right_wrist_image",
+            "observation.right_wrist_image",
+            "observation/images/cam_side",
+            "observation.images.cam_side",
+            "observation/images/cam_wrist1",
+            "observation.images.cam_wrist1",
+            "observation/images/cam_right_wrist",
+            "observation.images.cam_right_wrist",
+            "images/cam_side",
+            "images.cam_side",
+            "images/cam_wrist1",
+            "images.cam_wrist1",
+            "images/cam_right_wrist",
+            "images.cam_right_wrist",
+        ]
 
         base_raw = _get_first(
             data,
@@ -135,12 +155,21 @@ class ValueInputs(transforms.DataTransformFn):
             required=False,
             name="wrist_image",
         )
+        right_wrist_raw = _get_first(
+            data,
+            right_wrist_candidates,
+            required=False,
+            name="right_wrist_image",
+        )
         has_base = base_raw is not None
         if has_base and isinstance(base_raw, float) and np.isnan(base_raw):
             has_base = False
         has_wrist = wrist_raw is not None
         if has_wrist and isinstance(wrist_raw, float) and np.isnan(wrist_raw):
             has_wrist = False
+        has_right_wrist = right_wrist_raw is not None
+        if has_right_wrist and isinstance(right_wrist_raw, float) and np.isnan(right_wrist_raw):
+            has_right_wrist = False
 
         if not has_base and not has_wrist:
             raise KeyError(
@@ -159,6 +188,13 @@ class ValueInputs(transforms.DataTransformFn):
         else:
             wrist_image = np.zeros_like(base_image)
             use_wrist = False
+
+        if has_right_wrist:
+            right_wrist_image = _parse_image(right_wrist_raw)
+            use_right_wrist = True
+        else:
+            right_wrist_image = np.zeros_like(base_image)
+            use_right_wrist = False
 
         state = _get_first(
             data,
@@ -201,10 +237,12 @@ class ValueInputs(transforms.DataTransformFn):
             "image": {
                 "base_0_rgb": base_image,
                 "wrist_0_rgb": wrist_image,
+                "right_wrist_0_rgb": right_wrist_image,
             },
             "image_mask": {
                 "base_0_rgb": np.True_,
                 "wrist_0_rgb": np.True_ if use_wrist else np.False_,
+                "right_wrist_0_rgb": np.True_ if use_right_wrist else np.False_,
             },
         }
 

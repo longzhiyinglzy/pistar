@@ -16,7 +16,7 @@ Pipeline:
    Existing labels on rollout rows are overwritten; demo rows are preserved.
 
 LeRobot Dataset Format:
-- Key columns: intervention, reward_label, image, wrist_image, task_index
+- Key columns: intervention, reward_label, image, wrist_image, optional side_image, task_index
 - Intervention field: dtype=int64, shape=[1], intervention_flag
 - Reward field: dtype=float32, shape=[1], reward_label
 
@@ -1003,7 +1003,12 @@ def main() -> None:
     parser.add_argument("--adv_col", type=str, default="adv_ind", help="Advantage indicator column name to create")
     parser.add_argument("--base_image_col", type=str, default="image", help="Base image column name")
     parser.add_argument("--wrist_image_col", type=str, default="wrist_image", help="Wrist image column name")
-    parser.add_argument("--right_wrist_image_col", type=str, default=None, help="Right wrist image column name")
+    parser.add_argument(
+        "--right_wrist_image_col",
+        type=str,
+        default="side_image",
+        help="Third-view image column name (default: side_image)",
+    )
     parser.add_argument(
         "--copy_wrist_to_right",
         action=argparse.BooleanOptionalAction,

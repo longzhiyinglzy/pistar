@@ -20,7 +20,6 @@ import dataclasses
 import functools
 
 from etils import edc
-from etils.edc import ContextStack
 from etils.epy import _internal
 from flax import linen as nn
 import jax
@@ -99,7 +98,7 @@ def _mock_flax_module_param() -> None:
 def _should_replace_dtype(
     *,
     module: nn.Module,
-    stack: edc.ContextStack[_DTypeState],
+    stack,
 ) -> bool:
   """Whether or not the dtype should be replaced."""
   if not module.is_initializing() or not stack:

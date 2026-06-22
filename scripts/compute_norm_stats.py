@@ -8,6 +8,7 @@ to the config assets directory.
 import numpy as np
 import tqdm
 import tyro
+import dataclasses
 
 import openpi.models.model as _model
 import openpi.shared.normalize as normalize
@@ -86,9 +87,21 @@ def create_rlds_dataloader(
     return data_loader, num_batches
 
 
-def main(config_name: str, max_frames: int | None = None):
+def main(
+    config_name: str,
+    max_frames: int | None = None,
+    repo_id: str | None = None,
+    local_data_dir: str | None = None,
+):
     config = _config.get_config(config_name)
     data_config = config.data.create(config.assets_dirs, config.model)
+    if repo_id is not None or local_data_dir is not None:
+        data_config = dataclasses.replace(
+            data_config,
+            repo_id=repo_id or data_config.repo_id,
+            local_data_dir=local_data_dir or data_config.local_data_dir,
+            asset_id=repo_id or data_config.asset_id,
+        )
 
     if data_config.rlds_data_dir is not None:
         data_loader, num_batches = create_rlds_dataloader(

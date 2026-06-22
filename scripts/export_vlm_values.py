@@ -243,7 +243,12 @@ def main() -> None:
     parser.add_argument("--instruction_col", type=str, default=None, help="Instruction/prompt column")
     parser.add_argument("--base_image_col", type=str, default="image", help="Base image column")
     parser.add_argument("--wrist_image_col", type=str, default="wrist_image", help="Wrist image column")
-    parser.add_argument("--right_wrist_image_col", type=str, default=None, help="Right wrist image column")
+    parser.add_argument(
+        "--right_wrist_image_col",
+        type=str,
+        default="side_image",
+        help="Third-view image column (default: side_image)",
+    )
     parser.add_argument("--copy_wrist_to_right", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--lookahead", type=int, default=50, help="Optional oracle advantage horizon for exported metadata")
     parser.add_argument("--max_frames", type=int, default=None, help="Optional debug cap; omit it to export every frame")

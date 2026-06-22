@@ -14,8 +14,10 @@ from openpi.shared import array_typing as at
 # 添加 Gemma 配置导入
 import sys
 import os
-gemma_path = os.path.join(os.path.dirname(__file__), '../../../gemma')
+gemma_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '../../..', 'gemma'))
 sys.path.insert(0, gemma_path)
+if "gemma" in sys.modules and getattr(sys.modules["gemma"], "__file__", None) is None:
+    del sys.modules["gemma"]
 from gemma.gm.nn._gemma import Gemma3_270M
 
 if TYPE_CHECKING:
@@ -74,10 +76,12 @@ class ValueModelConfig(_model.BaseModelConfig):
                 images={
                     "base_0_rgb": image_spec,
                     "wrist_0_rgb": image_spec,
+                    "right_wrist_0_rgb": image_spec,
                 },
                 image_masks={
                     "base_0_rgb": image_mask_spec,
                     "wrist_0_rgb": image_mask_spec,
+                    "right_wrist_0_rgb": image_mask_spec,
                 },
                 state=jax.ShapeDtypeStruct([batch_size, self.action_dim], jnp.float32),
                 tokenized_prompt=jax.ShapeDtypeStruct([batch_size, self.max_token_len], jnp.int32),

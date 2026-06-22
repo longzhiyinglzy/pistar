@@ -388,6 +388,7 @@ class LeRobotPiperDataConfig(DataConfigFactory):
 
     extra_delta_transform: bool = False
     adv_ind_dropout: bool = True # Set to True during training to apply adv_ind dropout in model transforms
+    side_image_key: str | None = None
 
     @override
     def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
@@ -399,40 +400,24 @@ class LeRobotPiperDataConfig(DataConfigFactory):
         # For your own dataset, first figure out what keys your environment passes to the policy server
         # and then modify the mappings below so your dataset's keys get matched to those target keys.
         # The repack transform simply remaps key names here.
-        if not model_config.pistar:
-            repack_transform = _transforms.Group(
-                inputs=[
-                    _transforms.RepackTransform(
-                        {
-                            "images": {
-                                    "cam_high": "image",
-                                    "cam_wrist": "wrist_image",
-                            },
-                            "state": "state",
-                            "actions": "actions",
-                            "prompt": "prompt",
-                        }
-                    )
-                ]
-            )
-        else:
-            repack_transform = _transforms.Group(
-                inputs=[
-                    _transforms.RepackTransform(
-                        {
-                            "images": {
-                                    "cam_high": "image",
-                                    "cam_wrist": "wrist_image",
-                            },
-                            "state": "state",
-                            "actions": "actions",
-                            "prompt": "prompt",
-                            "adv_ind": "adv_ind", 
-                            # add adv_ind and filter out value, reward, epsilon, adv produced in pistar data processing
-                        }
-                    )
-                ]
-            )
+        image_mapping = {
+            "cam_high": "image",
+            "cam_wrist": "wrist_image",
+        }
+        if self.side_image_key is not None:
+            image_mapping["cam_wrist1"] = self.side_image_key
+
+        repack_structure = {
+            "images": image_mapping,
+            "state": "state",
+            "actions": "actions",
+            "prompt": "prompt",
+        }
+        if model_config.pistar:
+            repack_structure["adv_ind"] = "adv_ind"
+            # add adv_ind and filter out value, reward, epsilon, adv produced in pistar data processing
+
+        repack_transform = _transforms.Group(inputs=[_transforms.RepackTransform(repack_structure)])
 
         # The data transforms are applied to the data coming from the dataset *and* during inference.
         # Below, we define the transforms for data going into the model (``inputs``) and the transforms
@@ -1279,6 +1264,117 @@ _CONFIGS = [
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_droid/params"),
         num_train_steps=20_000,
         batch_size=32,
+    ),
+    # Pi05_star model fine-tuning on Piper block assembly, three-view dataset.
+    TrainConfig(
+        name="pi05_star_assemble_blocks",
+        project_name="pistar",
+        model=pi0_config.Pi0Config(pi05=True, pistar=True, action_horizon=10, discrete_state_input=False),
+        data=LeRobotPiperDataConfig(
+            repo_id="piper/assemble_block1_pistar_10hz_3view",
+            base_config=DataConfig(prompt_from_task=True),
+            extra_delta_transform=False,
+            side_image_key="side_image",
+        ),
+        batch_size=32,
+        num_workers=8,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1_000,
+            peak_lr=2.5e-5,
+            decay_steps=30_000,
+            decay_lr=2.5e-6,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=0.999,
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        pytorch_weight_path="/path/to/your/pytorch_weight_path",
+        num_train_steps=30_000,
+        keep_period=1_000,
+    ),
+    # Pi05_star model inference on Piper block assembly, three-view dataset.
+    TrainConfig(
+        name="pi05_star_assemble_blocks_infer",
+        project_name="pistar",
+        model=pi0_config.Pi0Config(pi05=True, pistar=True, action_horizon=10, discrete_state_input=False),
+        data=LeRobotPiperDataConfig(
+            repo_id="piper/assemble_block1_pistar_10hz_3view",
+            base_config=DataConfig(prompt_from_task=True),
+            extra_delta_transform=False,
+            adv_ind_dropout=False,
+            side_image_key="side_image",
+        ),
+        batch_size=32,
+        num_workers=8,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1_000,
+            peak_lr=2.5e-5,
+            decay_steps=30_000,
+            decay_lr=2.5e-6,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=0.999,
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        pytorch_weight_path="/path/to/your/pytorch_weight_path",
+        num_train_steps=30_000,
+        keep_period=1_000,
+    ),
+    # Pi05_star Piper block assembly, initialized from the user's full-finetuned pi0.5 checkpoint.
+    # This keeps the successful 30 Hz / action_horizon=50 setup used by the evaluated pi0.5 policy.
+    TrainConfig(
+        name="pi05_star_assemble_blocks_h50_from_pi05",
+        project_name="pistar",
+        model=pi0_config.Pi0Config(pi05=True, pistar=True, action_horizon=50, discrete_state_input=False),
+        data=LeRobotPiperDataConfig(
+            repo_id="piper/assemble_block1_pistar_30hz_3view",
+            base_config=DataConfig(prompt_from_task=True),
+            extra_delta_transform=False,
+            side_image_key="side_image",
+        ),
+        batch_size=32,
+        num_workers=8,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=500,
+            peak_lr=1.0e-5,
+            decay_steps=10_000,
+            decay_lr=1.0e-6,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=0.999,
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "/home/user/pi0.5/train/fullfinetune/pi05_Piper_AssembleBlock1/40000/params"
+        ),
+        pytorch_weight_path="/path/to/your/pytorch_weight_path",
+        num_train_steps=10_000,
+        keep_period=1_000,
+    ),
+    # Inference config for the h50 PiStar policy.
+    TrainConfig(
+        name="pi05_star_assemble_blocks_h50_from_pi05_infer",
+        project_name="pistar",
+        model=pi0_config.Pi0Config(pi05=True, pistar=True, action_horizon=50, discrete_state_input=False),
+        data=LeRobotPiperDataConfig(
+            repo_id="piper/assemble_block1_pistar_30hz_3view",
+            base_config=DataConfig(prompt_from_task=True),
+            extra_delta_transform=False,
+            adv_ind_dropout=False,
+            side_image_key="side_image",
+        ),
+        batch_size=32,
+        num_workers=8,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=500,
+            peak_lr=1.0e-5,
+            decay_steps=10_000,
+            decay_lr=1.0e-6,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=0.999,
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "/home/user/pi0.5/train/fullfinetune/pi05_Piper_AssembleBlock1/40000/params"
+        ),
+        pytorch_weight_path="/path/to/your/pytorch_weight_path",
+        num_train_steps=10_000,
+        keep_period=1_000,
     ),
     #
     # ALOHA Sim configs. This config is used to demonstrate how to train on a simple simulated environment.

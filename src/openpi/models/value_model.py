@@ -12,8 +12,10 @@ from openpi.models import model as _model
 import sys
 import os
 # 添加 gemma 目录到 Python 路径
-gemma_path = os.path.join(os.path.dirname(__file__), '../../../gemma')
+gemma_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '../../..', 'gemma'))
 sys.path.insert(0, gemma_path)
+if "gemma" in sys.modules and getattr(sys.modules["gemma"], "__file__", None) is None:
+    del sys.modules["gemma"]
 from gemma.gm.nn._gemma import Gemma3_270M
 from gemma.gm.nn._modules import Embedder
 from gemma.gm.nn import _transformer

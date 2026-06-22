@@ -174,10 +174,18 @@ class PI0_SINGLE:
 
     def update_observation_window(self, img_arr, state):
         img_head, img_wrist = img_arr[0], img_arr[1]
+        img_side = img_arr[2] if len(img_arr) > 2 and img_arr[2] is not None else np.zeros_like(img_head)
         self.observation_window = {
             "observation/state": state,
             "observation/image": img_head,
             "observation/wrist_image": img_wrist,
+            "observation/side_image": img_side,
+            "state": state,
+            "images": {
+                "cam_high": img_head,
+                "cam_wrist": img_wrist,
+                "cam_wrist1": img_side,
+            },
             "prompt": self.instruction,
         }
         if self.use_adv_ind:

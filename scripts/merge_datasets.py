@@ -6,9 +6,10 @@
 - 前置假设:
   - 真机转换脚本 / 仿真转换脚本已经把数据统一成同一套 LeRobot 字段。
   - 本脚本不负责补字段、不负责修字段、不负责区分真机还是仿真。
-- 本脚本只做合并，按下面这 14 个键输出 parquet:
+- 本脚本只做合并，按下面这些键输出 parquet:
   - `image`
   - `wrist_image`
+  - `side_image`（可选；任一源数据集包含时保留）
   - `state`
   - `actions`
   - `intervention`
@@ -34,7 +35,7 @@
 
 处理方式:
 - 直接按 parquet + meta 重写输出数据集
-- 保留每一帧这 14 个键
+- 保留每一帧的必需键；如果源数据集包含 `side_image`，也会保留
 - 重新生成全局一致的:
   - `task_index`
   - `episode_index`
@@ -46,7 +47,7 @@
 数据合并示意:
     +------------------------------------------------------------------+
     | Dataset A                                                        |
-    | keys: image, wrist_image, state, actions, intervention,          |
+    | keys: image, wrist_image, optional side_image, state, actions,   |
     |       value_label, reward, reward_label, adv_ind, timestamp,     |
     |       frame_index, episode_index, index, task_index              |
     +------------------------------------------------------------------+
@@ -55,7 +56,7 @@
                               |
     +------------------------------------------------------------------+
     | Dataset B                                                        |
-    | keys: image, wrist_image, state, actions, intervention,          |
+    | keys: image, wrist_image, optional side_image, state, actions,   |
     |       value_label, reward, reward_label, adv_ind, timestamp,     |
     |       frame_index, episode_index, index, task_index              |
     +------------------------------------------------------------------+
@@ -64,13 +65,13 @@
                               v
     +------------------------------------------------------------------+
     | Output Dataset                                                   |
-    | keys: image, wrist_image, state, actions, intervention,          |
+    | keys: image, wrist_image, optional side_image, state, actions,   |
     |       value_label, reward, reward_label, adv_ind, timestamp,     |
     |       frame_index, episode_index, index, task_index              |
     +------------------------------------------------------------------+
 
     字段变化:
-    Dataset A/B -----> Output : image, wrist_image, state, actions
+    Dataset A/B -----> Output : image, wrist_image, optional side_image, state, actions
     Dataset A/B -----> Output : intervention, value_label, reward, reward_label, adv_ind
     Dataset A/B -----> Output : timestamp
     Dataset A/B -----> Output : frame_index, episode_index, index, task_index
@@ -80,7 +81,7 @@
 English summary:
 - This is a merge-only script.
 - It assumes source datasets are already normalized to the same LeRobot schema.
-- It keeps only the 14 required keys and rewrites parquet/meta directly.
+- It keeps required keys plus optional `side_image` and rewrites parquet/meta directly.
 - It does not fill missing fields or alter image layout/size.
 
 Usage:
@@ -111,7 +112,7 @@ import tqdm
 
 
 PARQUET_RE = re.compile(r"episode_(\d+)\.parquet$")
-KEEP_COLUMNS = [
+REQUIRED_KEEP_COLUMNS = [
     "image",
     "wrist_image",
     "state",
@@ -127,7 +128,11 @@ KEEP_COLUMNS = [
     "index",
     "task_index",
 ]
-KEEP_COLUMNS_SET = set(KEEP_COLUMNS)
+OPTIONAL_KEEP_COLUMNS = [
+    "side_image",
+]
+CANDIDATE_KEEP_COLUMNS = REQUIRED_KEEP_COLUMNS + OPTIONAL_KEEP_COLUMNS
+CANDIDATE_KEEP_COLUMNS_SET = set(CANDIDATE_KEEP_COLUMNS)
 
 
 def _load_json(path: Path) -> dict[str, Any]:
@@ -213,31 +218,37 @@ def _load_sources(sources: list[Path]) -> list[dict[str, Any]]:
 
 def _ensure_schema(
     sources: list[dict[str, Any]],
-) -> tuple[dict[str, pa.DataType], dict[str, Any]]:
+) -> tuple[dict[str, pa.DataType], dict[str, Any], list[str]]:
     global_types: dict[str, pa.DataType] = {}
     merged_features: dict[str, Any] = {}
 
     for src in sources:
         features = dict(src["info"].get("features", {}))
-        for key in KEEP_COLUMNS:
+        for key in CANDIDATE_KEEP_COLUMNS:
             if key in features and key not in merged_features:
                 merged_features[key] = _feature_entry(key, features[key])
 
         for episode_idx in src["selected_eps"][:1]:
             table = pq.read_table(src["episode_files"][episode_idx])
             for field in table.schema:
-                if field.name in KEEP_COLUMNS_SET and field.name not in global_types:
+                if field.name in CANDIDATE_KEEP_COLUMNS_SET and field.name not in global_types:
                     global_types[field.name] = field.type
 
-    missing_features = [key for key in KEEP_COLUMNS if key not in merged_features]
+    optional_columns = [
+        key for key in OPTIONAL_KEEP_COLUMNS
+        if key in merged_features and key in global_types
+    ]
+    keep_columns = REQUIRED_KEEP_COLUMNS + optional_columns
+
+    missing_features = [key for key in keep_columns if key not in merged_features]
     if missing_features:
         raise ValueError(f"Missing feature metadata for required keys: {missing_features}")
 
-    missing_types = [key for key in KEEP_COLUMNS if key not in global_types]
+    missing_types = [key for key in keep_columns if key not in global_types]
     if missing_types:
         raise ValueError(f"Missing parquet schema types for required keys: {missing_types}")
 
-    return global_types, merged_features
+    return global_types, {key: merged_features[key] for key in keep_columns}, keep_columns
 
 
 def _set_or_add_column(table: pa.Table, name: str, arr: pa.Array) -> pa.Table:
@@ -247,11 +258,14 @@ def _set_or_add_column(table: pa.Table, name: str, arr: pa.Array) -> pa.Table:
     return table.set_column(idx, name, arr)
 
 
-def _select_required_columns(table: pa.Table) -> pa.Table:
-    missing = [key for key in KEEP_COLUMNS if table.schema.get_field_index(key) < 0]
+def _select_required_columns(table: pa.Table, keep_columns: list[str], global_types: dict[str, pa.DataType]) -> pa.Table:
+    missing = [key for key in REQUIRED_KEEP_COLUMNS if table.schema.get_field_index(key) < 0]
     if missing:
         raise ValueError(f"Source episode is missing required keys: {missing}")
-    return table.select(KEEP_COLUMNS)
+    for key in OPTIONAL_KEEP_COLUMNS:
+        if key in keep_columns and table.schema.get_field_index(key) < 0:
+            table = table.append_column(key, pa.nulls(table.num_rows, type=global_types[key]))
+    return table.select(keep_columns)
 
 
 def _available_cpu_threads() -> int:
@@ -307,14 +321,16 @@ def _prepare_episode_table(
     episode_file: Path,
     old_episode_idx: int,
     episode_meta_row: dict[str, Any],
+    keep_columns: list[str],
+    global_types: dict[str, pa.DataType],
 ) -> tuple[pa.Table, int, list[str]]:
     table = pq.read_table(episode_file)
-    table = _select_required_columns(table)
+    table = _select_required_columns(table, keep_columns, global_types)
     ep_tasks = list(episode_meta_row.get("tasks", []))
     return table, old_episode_idx, ep_tasks
 
 
-def _prepare_episode_item(item: tuple[Path, int, dict[str, Any]]) -> tuple[pa.Table, int, list[str]]:
+def _prepare_episode_item(item: tuple[Path, int, dict[str, Any], list[str], dict[str, pa.DataType]]) -> tuple[pa.Table, int, list[str]]:
     return _prepare_episode_table(*item)
 
 
@@ -352,8 +368,7 @@ def main() -> None:
     (output_root / "meta").mkdir(parents=True, exist_ok=True)
 
     loaded = _load_sources(sources)
-    global_types, merged_features = _ensure_schema(loaded)
-    del global_types  # schema check only; output writes use source arrow tables directly.
+    global_types, merged_features, keep_columns = _ensure_schema(loaded)
 
     global_task_to_index: dict[str, int] = {}
     out_episodes: list[dict[str, Any]] = []
@@ -378,7 +393,13 @@ def main() -> None:
             episodes_rows_map: dict[int, dict[str, Any]] = src["episodes_rows_map"]
 
             work_items = [
-                (src["episode_files"][old_episode_idx], old_episode_idx, episodes_rows_map.get(old_episode_idx, {}))
+                (
+                    src["episode_files"][old_episode_idx],
+                    old_episode_idx,
+                    episodes_rows_map.get(old_episode_idx, {}),
+                    keep_columns,
+                    global_types,
+                )
                 for old_episode_idx in src["selected_eps"]
             ]
 
@@ -405,7 +426,7 @@ def main() -> None:
                         output_root / "data" / f"chunk-{out_chunk_idx:03d}" / f"episode_{new_episode_idx:06d}.parquet"
                     )
                     out_parquet.parent.mkdir(parents=True, exist_ok=True)
-                    pq.write_table(table.select(KEEP_COLUMNS), out_parquet)
+                    pq.write_table(table.select(keep_columns), out_parquet)
 
                     out_episodes.append(
                         {
@@ -456,7 +477,7 @@ def main() -> None:
     print("Done.", flush=True)
     print(f"Output: {output_root}", flush=True)
     print(f"Episodes: {total_episodes}, Frames: {total_frames}, Tasks: {len(out_tasks)}", flush=True)
-    print(f"Keys: {KEEP_COLUMNS}", flush=True)
+    print(f"Keys: {keep_columns}", flush=True)
 
 
 if __name__ == "__main__":

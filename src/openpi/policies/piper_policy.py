@@ -14,6 +14,7 @@ def make_piper_example() -> dict:
         "images": {
             "cam_high": np.random.randint(256, size=(3, 224, 224), dtype=np.uint8),
             "cam_wrist": np.random.randint(256, size=(3, 224, 224), dtype=np.uint8),
+            "cam_wrist1": np.random.randint(256, size=(3, 224, 224), dtype=np.uint8),
         },
         "prompt": "do something",
     }
@@ -24,12 +25,12 @@ class PiperInputs(transforms.DataTransformFn):
     """Inputs for Piper single-arm policy.
     
     Expected inputs:
-    - images: dict with "cam_high" and "cam_wrist"
+    - images: dict with "cam_high", "cam_wrist", and optional "cam_wrist1"
     - state: [7] (6 joints + 1 gripper)
     - actions: [action_horizon, 7]
     """
 
-    EXPECTED_CAMERAS: ClassVar[tuple[str, ...]] = ("cam_high", "cam_wrist")
+    EXPECTED_CAMERAS: ClassVar[tuple[str, ...]] = ("cam_high", "cam_wrist", "cam_wrist1")
 
     def __call__(self, data: dict) -> dict:
         state = np.asarray(data["state"], dtype=np.float32)
