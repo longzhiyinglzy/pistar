@@ -774,6 +774,24 @@ def _pop_batch_key(batch: dict[str, Any], key: str) -> np.ndarray | None:
     return _to_int_array(value)
 
 
+def _build_value_infer_fn(model, supports):
+    """Build an inference JIT with model arrays passed as dynamic inputs."""
+    import flax.nnx as nnx
+    import jax
+    import jax.numpy as jnp
+
+    model_def, model_state = nnx.split(model)
+
+    @jax.jit
+    def infer_fn(state, observation):
+        runtime_model = nnx.merge(model_def, state)
+        logits = runtime_model(observation, train=False)
+        probs = jax.nn.softmax(logits, axis=-1)
+        return jnp.sum(probs * supports, axis=-1)
+
+    return model_state, infer_fn
+
+
 def _compute_values_with_dataloader(
     *,
     dataset,
@@ -784,7 +802,6 @@ def _compute_values_with_dataloader(
     seed: int,
 ) -> InferredValueCache:
     import jax
-    import jax.numpy as jnp
     from openpi.models import model as _model
     import openpi.training.data_loader as _data_loader
 
@@ -813,11 +830,7 @@ def _compute_values_with_dataloader(
     cache = InferredValueCache()
     rng = jax.random.key(0)
 
-    @jax.jit
-    def infer_fn(observation: _model.Observation) -> jax.Array:
-        logits = model(observation, train=False)
-        probs = jax.nn.softmax(logits, axis=-1)
-        return jnp.sum(probs * supports, axis=-1)
+    model_state, infer_fn = _build_value_infer_fn(model, supports)
 
     pbar = tqdm(
         torch_loader,
@@ -836,7 +849,7 @@ def _compute_values_with_dataloader(
         observation = _model.Observation.from_dict(batch)
         available_keys = list(observation.images.keys())
         observation = _model.preprocess_observation(rng, observation, train=False, image_keys=available_keys)
-        values_batch = np.asarray(jax.device_get(infer_fn(observation)), dtype=np.float32)
+        values_batch = np.asarray(jax.device_get(infer_fn(model_state, observation)), dtype=np.float32)
         cache.flat_values.extend(values_batch.tolist())
 
         if episode_indices is None:

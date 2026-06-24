@@ -1,5 +1,8 @@
 import numpy as np
 import orbax.checkpoint as ocp
+import flax.nnx as nnx
+import jax
+import jax.numpy as jnp
 
 from scripts import label_advantage_from_vlm
 from scripts import train_value
@@ -129,3 +132,24 @@ def test_checkpoint_loader_enables_orbax_partial_restore(monkeypatch, tmp_path):
 
     assert captured["args"].transforms == {}
     np.testing.assert_array_equal(np.asarray(params["weight"]), [2.0])
+
+
+def test_value_inference_passes_model_state_as_jit_input():
+    class _TinyValueModel(nnx.Module):
+        def __init__(self):
+            self.bias = nnx.Param(jnp.asarray([0.5, -0.5], dtype=jnp.float32))
+
+        def __call__(self, observation, *, train=False):
+            del train
+            return observation + self.bias
+
+    supports = jnp.asarray([-1.0, 0.0], dtype=jnp.float32)
+    state, infer_fn = label_advantage_from_vlm._build_value_infer_fn(
+        _TinyValueModel(),
+        supports,
+    )
+
+    values = infer_fn(state, jnp.asarray([[0.0, 0.0]], dtype=jnp.float32))
+
+    expected = jnp.sum(jax.nn.softmax(jnp.asarray([[0.5, -0.5]]), axis=-1) * supports, axis=-1)
+    np.testing.assert_allclose(np.asarray(values), np.asarray(expected), rtol=1e-6)
