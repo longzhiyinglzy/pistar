@@ -300,8 +300,14 @@ class GemmaValueTokenizer:
         state["_tokenizer"] = None
         return state
 
-    def tokenize(self, prompt: str, state: Any | None = None) -> tuple[np.ndarray, np.ndarray]:
-        del state
+    def tokenize(
+        self,
+        prompt: str,
+        state: Any | None = None,
+        adv_ind: str | None = None,
+        adv_ind_dropout: bool = True,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        del state, adv_ind, adv_ind_dropout
 
         tokenizer = self._get_tokenizer()
         text = f"{str(prompt).rstrip()}\nValue:"
