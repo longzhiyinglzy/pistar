@@ -4,7 +4,8 @@
     python scripts/train_value.py \
         --data_dir /path/to/lerobot_dataset \
         --checkpoint_dir /path/to/save/checkpoints \
-        --batch_size 32 \
+        --batch_size 4 \
+        --gradient_accumulation_steps 4 \
         --num_train_steps 10000 \
         --load_pretrained  # 加载 PaliGemma 预训练权重
 """
@@ -389,9 +390,39 @@ def train_step(
     freeze_mode: str = "all_backbones",
 ) -> tuple[TrainState, dict[str, jnp.ndarray]]:
     """单步训练。"""
+    grads, loss = compute_gradients(
+        state,
+        rng,
+        observation,
+        target,
+        freeze_mode=freeze_mode,
+    )
+    new_state, info = apply_gradients(
+        state,
+        tx,
+        grads,
+        ema_decay=ema_decay,
+        freeze_mode=freeze_mode,
+    )
+    info["loss"] = loss
+    return new_state, info
+
+
+def compute_gradients(
+    state: TrainState,
+    rng: at.KeyArrayLike,
+    observation: _model.Observation,
+    target: jnp.ndarray,
+    *,
+    micro_step: int | jax.Array | None = None,
+    freeze_mode: str = "all_backbones",
+) -> tuple[nnx.State, jnp.ndarray]:
+    """Compute gradients for one micro-batch without updating model state."""
     model = nnx.merge(state.model_def, state.params)
     model.train()
     train_rng = jax.random.fold_in(rng, state.step)
+    if micro_step is not None:
+        train_rng = jax.random.fold_in(train_rng, micro_step)
     trainable_filter = _make_trainable_filter(freeze_mode)
 
     def loss_fn(model):
@@ -399,6 +430,20 @@ def train_step(
 
     diff_state = nnx.DiffState(0, trainable_filter)
     loss, grads = nnx.value_and_grad(loss_fn, argnums=diff_state)(model)
+    return grads, loss
+
+
+def apply_gradients(
+    state: TrainState,
+    tx: optax.GradientTransformation,
+    grads: nnx.State,
+    *,
+    ema_decay: float = 0.99,
+    freeze_mode: str = "all_backbones",
+) -> tuple[TrainState, dict[str, jnp.ndarray]]:
+    """Apply one averaged gradient update and advance the optimizer step once."""
+    model = nnx.merge(state.model_def, state.params)
+    trainable_filter = _make_trainable_filter(freeze_mode)
 
     params = state.params.filter(trainable_filter)
     updates, new_opt_state = tx.update(grads, state.opt_state, params)
@@ -424,7 +469,6 @@ def train_step(
     )
 
     info = {
-        "loss": loss,
         "grad_norm": optax.global_norm(grads),
         "siglip_param_norm": _kernel_param_norm(full_params, _make_group_filter("siglip")),
         "trainable_param_norm": _kernel_param_norm(full_params, trainable_filter),
@@ -512,7 +556,13 @@ def main():
     parser.add_argument("--data_dir", type=str, required=True, help="LeRobot 数据集路径")
     parser.add_argument("--val_data_dir", type=str, default=None, help="可选的验证集路径")
     parser.add_argument("--checkpoint_dir", type=str, required=True, help="Checkpoint 保存路径")
-    parser.add_argument("--batch_size", type=int, default=32, help="Batch size")
+    parser.add_argument("--batch_size", type=int, default=32, help="每个 micro-batch 的大小")
+    parser.add_argument(
+        "--gradient_accumulation_steps",
+        type=int,
+        default=1,
+        help="每次优化器更新累积的 micro-batch 数；有效 batch=batch_size*此参数",
+    )
     parser.add_argument("--num_train_steps", type=int, default=30000, help="训练步数")
     parser.add_argument("--log_interval", type=int, default=100, help="日志间隔")
     parser.add_argument("--val_interval", type=int, default=100, help="验证间隔步数，<=0 表示禁用验证")
@@ -545,6 +595,10 @@ def main():
         help="冻结策略: none=全量训练, siglip_only=只冻结SigLIP, all_backbones=冻结SigLIP和Gemma backbone",
     )
     args = parser.parse_args()
+    if args.batch_size <= 0:
+        parser.error("--batch_size must be positive")
+    if args.gradient_accumulation_steps <= 0:
+        parser.error("--gradient_accumulation_steps must be positive")
 
     init_logging()
     logging.info(f"\033[1;34;46mRunning on:\033[0m \033[1;33;40m{platform.node()}\033[0m")
@@ -617,8 +671,12 @@ def main():
         wandb.define_metric("val/*", step_metric="step")
 
     logging.info("\033[1;36m初始化数据加载器...\033[0m")
-    effective_batch_size = args.batch_size
-    logging.info(f"全局batch size: {effective_batch_size}")
+    micro_batch_size = args.batch_size
+    effective_batch_size = micro_batch_size * args.gradient_accumulation_steps
+    logging.info(f"micro-batch size: {micro_batch_size}")
+    logging.info(
+        f"梯度累积: {args.gradient_accumulation_steps}, effective batch size: {effective_batch_size}"
+    )
     logging.info(console.info(f"freeze_mode={args.freeze_mode}"))
     logging.info(console.info(f"训练标签列: {VALUE_LABEL_COLUMN} (兼容旧列 {LEGACY_VALUE_LABEL_COLUMN})"))
 
@@ -660,7 +718,7 @@ def main():
     data_loader = _data_loader.create_value_data_loader(
         data_config,
         model_config=config,
-        batch_size=effective_batch_size,
+        batch_size=micro_batch_size,
         sharding=data_sharding,
         shuffle=True,
         num_workers=max_workers,
@@ -668,9 +726,25 @@ def main():
         skip_norm_stats=True,
         framework="jax",
     )
-    logging.info(console.info(f"数据集大小: {len(data_loader.dataset)} 帧"))
+    dataset_size = len(data_loader.dataset)
+    logging.info(console.info(f"数据集大小: {dataset_size} 帧"))
+    scheduled_samples = args.num_train_steps * effective_batch_size
+    logging.info(
+        console.info(
+            f"计划训练样本: {scheduled_samples} 帧, 约 {scheduled_samples / dataset_size:.2f} epochs "
+            f"({args.num_train_steps} optimizer steps)"
+        )
+    )
     if wandb_run is not None:
-        wandb_run.config.update({"dataset_size": len(data_loader.dataset), "effective_batch_size": effective_batch_size}, allow_val_change=True)
+        wandb_run.config.update(
+            {
+                "dataset_size": len(data_loader.dataset),
+                "micro_batch_size": micro_batch_size,
+                "gradient_accumulation_steps": args.gradient_accumulation_steps,
+                "effective_batch_size": effective_batch_size,
+            },
+            allow_val_change=True,
+        )
 
     val_loader = None
     val_num_batches = 0
@@ -689,20 +763,20 @@ def main():
                 config,
             )
             val_dataset_size = len(val_dataset)
-            if val_dataset_size < effective_batch_size:
+            if val_dataset_size < micro_batch_size:
                 raise ValueError(
-                    f"验证集太小: {val_dataset_size} 帧，小于 batch_size={effective_batch_size}"
+                    f"验证集太小: {val_dataset_size} 帧，小于 batch_size={micro_batch_size}"
                 )
-            val_num_batches = val_dataset_size // effective_batch_size
-            val_remainder = val_dataset_size % effective_batch_size
+            val_num_batches = val_dataset_size // micro_batch_size
+            val_remainder = val_dataset_size % micro_batch_size
             if val_num_batches == 0:
                 raise ValueError(
-                    f"验证集完整batch数为0: val_dataset_size={val_dataset_size}, batch_size={effective_batch_size}"
+                    f"验证集完整batch数为0: val_dataset_size={val_dataset_size}, batch_size={micro_batch_size}"
                 )
             val_loader = _data_loader.create_value_data_loader(
                 val_data_config,
                 model_config=config,
-                batch_size=effective_batch_size,
+                batch_size=micro_batch_size,
                 sharding=data_sharding,
                 shuffle=False,
                 num_batches=val_num_batches,
@@ -799,6 +873,74 @@ def main():
         in_shardings=(
             replicated_sharding,  # params
             replicated_sharding,  # model_def
+            replicated_sharding,  # step
+            replicated_sharding,  # rng
+            data_sharding,        # observation
+            data_sharding,        # target
+            replicated_sharding,  # micro_step
+        ),
+        out_shardings=(
+            replicated_sharding,  # grads
+            replicated_sharding,  # loss
+        ),
+    )
+    def jit_compute_gradients(params, model_def, step, rng, observation, target, micro_step):
+        state = TrainState(
+            step=step,
+            params=params,
+            model_def=model_def,
+            opt_state=None,
+            ema_params=None,
+        )
+        return compute_gradients(
+            state,
+            rng,
+            observation,
+            target,
+            micro_step=micro_step,
+            freeze_mode=args.freeze_mode,
+        )
+
+    @functools.partial(
+        jax.jit,
+        in_shardings=(
+            replicated_sharding,  # params
+            replicated_sharding,  # model_def
+            replicated_sharding,  # opt_state
+            replicated_sharding,  # ema_params
+            replicated_sharding,  # step
+            replicated_sharding,  # averaged grads
+        ),
+        out_shardings=(
+            replicated_sharding,  # new_params
+            replicated_sharding,  # new_model_def
+            replicated_sharding,  # new_opt_state
+            replicated_sharding,  # new_ema_params
+            replicated_sharding,  # new_step
+            replicated_sharding,  # info
+        ),
+    )
+    def jit_apply_gradients(params, model_def, opt_state, ema_params, step, grads):
+        state = TrainState(
+            step=step,
+            params=params,
+            model_def=model_def,
+            opt_state=opt_state,
+            ema_params=ema_params,
+        )
+        new_state, info = apply_gradients(
+            state,
+            tx,
+            grads,
+            freeze_mode=args.freeze_mode,
+        )
+        return new_state.params, new_state.model_def, new_state.opt_state, new_state.ema_params, new_state.step, info
+
+    @functools.partial(
+        jax.jit,
+        in_shardings=(
+            replicated_sharding,  # params
+            replicated_sharding,  # model_def
             replicated_sharding,  # rng
             data_sharding,        # observation
             data_sharding,        # target
@@ -848,16 +990,35 @@ def main():
     logging.info("\033[1;36mJIT编译预热...\033[0m")
     observation, value = prefetch_batches[0]
     with sharding.set_mesh(mesh):
-        warmup_result = jit_train_step(
-            train_state.params,
-            train_state.model_def,
-            train_state.opt_state,
-            train_state.ema_params,
-            train_state.step,
-            train_rng,
-            observation,
-            value,
-        )
+        if args.gradient_accumulation_steps == 1:
+            warmup_result = jit_train_step(
+                train_state.params,
+                train_state.model_def,
+                train_state.opt_state,
+                train_state.ema_params,
+                train_state.step,
+                train_rng,
+                observation,
+                value,
+            )
+        else:
+            warmup_grads, _ = jit_compute_gradients(
+                train_state.params,
+                train_state.model_def,
+                train_state.step,
+                train_rng,
+                observation,
+                value,
+                jnp.asarray(0, dtype=jnp.int32),
+            )
+            warmup_result = jit_apply_gradients(
+                train_state.params,
+                train_state.model_def,
+                train_state.opt_state,
+                train_state.ema_params,
+                train_state.step,
+                warmup_grads,
+            )
         jax.block_until_ready(warmup_result)
         del warmup_result
     logging.info("\033[1;32mJIT编译完成，开始训练...\033[0m")
@@ -865,6 +1026,18 @@ def main():
     # 重新初始化数据迭代器
     data_iter = iter(data_loader)
     prefetch_idx = 0
+
+    def next_train_batch():
+        nonlocal data_iter, prefetch_idx
+        if prefetch_idx < len(prefetch_batches):
+            batch = prefetch_batches[prefetch_idx]
+            prefetch_idx += 1
+            return batch
+        try:
+            return next(data_iter)
+        except StopIteration:
+            data_iter = iter(data_loader)
+            return next(data_iter)
 
     def run_validation(step: int) -> None:
         if val_loader is None:
@@ -900,27 +1073,58 @@ def main():
 
     for step in pbar:
         progress.sync_pbar_color(pbar)
-        # 使用预取的batch或获取新batch
-        if prefetch_idx < len(prefetch_batches):
-            observation, value = prefetch_batches[prefetch_idx]
-            prefetch_idx += 1
-        else:
-            try:
-                observation, value = next(data_iter)
-            except StopIteration:
-                data_iter = iter(data_loader)
-                observation, value = next(data_iter)
         with sharding.set_mesh(mesh):
-            new_params, new_model_def, new_opt_state, new_ema_params, new_step, info = jit_train_step(
-                train_state.params,
-                train_state.model_def,
-                train_state.opt_state,
-                train_state.ema_params,
-                train_state.step,
-                train_rng,
-                observation,
-                value,
-            )
+            if args.gradient_accumulation_steps == 1:
+                observation, value = next_train_batch()
+                new_params, new_model_def, new_opt_state, new_ema_params, new_step, info = jit_train_step(
+                    train_state.params,
+                    train_state.model_def,
+                    train_state.opt_state,
+                    train_state.ema_params,
+                    train_state.step,
+                    train_rng,
+                    observation,
+                    value,
+                )
+            else:
+                accumulated_grads = None
+                micro_losses = []
+                for micro_step in range(args.gradient_accumulation_steps):
+                    observation, value = next_train_batch()
+                    grads, micro_loss = jit_compute_gradients(
+                        train_state.params,
+                        train_state.model_def,
+                        train_state.step,
+                        train_rng,
+                        observation,
+                        value,
+                        jnp.asarray(micro_step, dtype=jnp.int32),
+                    )
+                    if accumulated_grads is None:
+                        accumulated_grads = grads
+                    else:
+                        accumulated_grads = jax.tree.map(
+                            lambda total, current: total + current,
+                            accumulated_grads,
+                            grads,
+                        )
+                    micro_losses.append(micro_loss)
+
+                averaged_grads = jax.tree.map(
+                    lambda grad: grad / args.gradient_accumulation_steps,
+                    accumulated_grads,
+                )
+                new_params, new_model_def, new_opt_state, new_ema_params, new_step, info = jit_apply_gradients(
+                    train_state.params,
+                    train_state.model_def,
+                    train_state.opt_state,
+                    train_state.ema_params,
+                    train_state.step,
+                    averaged_grads,
+                )
+                info = dict(info)
+                info["loss"] = jnp.mean(jnp.stack(micro_losses))
+
             train_state = TrainState(
                 step=new_step,
                 params=new_params,
