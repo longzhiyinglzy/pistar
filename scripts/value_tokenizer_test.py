@@ -55,3 +55,28 @@ def test_parquet_reader_skips_missing_columns_without_loading_images(tmp_path):
 
     assert list(result.columns) == ["frame_index"]
     assert result["frame_index"].tolist() == [0, 1]
+
+
+def test_checkpoint_loader_selects_only_requested_parameter_tree(tmp_path):
+    metadata = {
+        "params": {"weight": "regular"},
+        "ema_params": {"weight": "ema"},
+        "opt_state": {"weight": "optimizer"},
+    }
+    checkpoint_path = tmp_path / "step_00000001"
+
+    ema, ema_key = label_advantage_from_vlm._select_checkpoint_restore_item(
+        metadata,
+        use_ema=True,
+        checkpoint_path=checkpoint_path,
+    )
+    regular, regular_key = label_advantage_from_vlm._select_checkpoint_restore_item(
+        metadata,
+        use_ema=False,
+        checkpoint_path=checkpoint_path,
+    )
+
+    assert ema == {"ema_params": {"weight": "ema"}}
+    assert ema_key == "ema_params"
+    assert regular == {"params": {"weight": "regular"}}
+    assert regular_key == "params"

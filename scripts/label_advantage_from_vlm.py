@@ -127,6 +127,23 @@ def _resolve_checkpoint_path(checkpoint_dir: Path, checkpoint_name: str | None) 
     return candidates[-1]
 
 
+def _select_checkpoint_restore_item(
+    metadata: Any,
+    *,
+    use_ema: bool,
+    checkpoint_path: Path,
+) -> tuple[Any, str | None]:
+    if not isinstance(metadata, dict):
+        return metadata, None
+    if use_ema and "ema_params" in metadata:
+        restore_key = "ema_params"
+    elif "params" in metadata:
+        restore_key = "params"
+    else:
+        raise KeyError(f"Checkpoint missing 'params' and 'ema_params': {checkpoint_path}")
+    return {restore_key: metadata[restore_key]}, restore_key
+
+
 def _load_checkpoint_params(checkpoint_path: Path, *, use_ema: bool) -> dict:
     """Load checkpoint params, handling device mismatch for inference."""
     import jax
@@ -152,12 +169,13 @@ def _load_checkpoint_params(checkpoint_path: Path, *, use_ema: bool) -> dict:
         # Load with explicit restore args to avoid sharding=None issues in newer JAX/Orbax.
         def _restore_with(restore_type: type[np.ndarray] | type[jax.Array]) -> dict:
             metadata = ckptr.metadata(str(checkpoint_path))
-            if isinstance(metadata, dict):
-                item = {k: metadata[k] for k in ("params", "ema_params") if k in metadata}
-                if not item:
-                    item = metadata
-            else:
-                item = metadata
+            item, restore_key = _select_checkpoint_restore_item(
+                metadata,
+                use_ema=use_ema,
+                checkpoint_path=checkpoint_path,
+            )
+            if restore_key is not None:
+                LOG.info("Restoring only checkpoint subtree: %s", restore_key)
             restore_args = jax.tree_util.tree_map(
                 lambda _: ocp.ArrayRestoreArgs(sharding=sharding, restore_type=restore_type),
                 item,
