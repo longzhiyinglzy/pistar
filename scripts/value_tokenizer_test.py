@@ -37,3 +37,21 @@ def test_jax_step_converts_to_python_int_for_tqdm():
 
     assert train_value._as_host_int(step) == 7
     assert isinstance(train_value._as_host_int(step), int)
+
+
+def test_parquet_reader_skips_missing_columns_without_loading_images(tmp_path):
+    path = tmp_path / "episode.parquet"
+    label_advantage_from_vlm.pd.DataFrame(
+        {
+            "frame_index": [0, 1],
+            "image": [b"frame-0", b"frame-1"],
+        }
+    ).to_parquet(path, index=False)
+
+    result = label_advantage_from_vlm._read_parquet_columns(
+        path,
+        ["frame_index", "value_lable"],
+    )
+
+    assert list(result.columns) == ["frame_index"]
+    assert result["frame_index"].tolist() == [0, 1]

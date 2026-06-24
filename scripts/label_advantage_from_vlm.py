@@ -51,6 +51,7 @@ from datasets.features.features import Features, _FEATURE_TYPES
 import numpy as np
 import pandas as pd
 from PIL import Image
+import pyarrow.parquet as pq
 import torch
 from tqdm import tqdm
 
@@ -873,10 +874,9 @@ def _resolve_values_for_episode(
 
 def _read_parquet_columns(path: Path, columns: list[str]) -> pd.DataFrame:
     requested = [column for column in columns if column]
-    try:
-        return pd.read_parquet(path, columns=requested)
-    except Exception:
-        return pd.read_parquet(path)
+    available = set(pq.read_schema(path).names)
+    selected = [column for column in requested if column in available]
+    return pd.read_parquet(path, columns=selected)
 
 
 def _compute_advantages(values: np.ndarray, reward_labels: np.ndarray, lookahead: int) -> np.ndarray:
