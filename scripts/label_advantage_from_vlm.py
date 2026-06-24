@@ -133,11 +133,12 @@ def _select_checkpoint_restore_item(
     use_ema: bool,
     checkpoint_path: Path,
 ) -> tuple[Any, str | None]:
-    if not isinstance(metadata, dict):
+    if not hasattr(metadata, "keys") or not hasattr(metadata, "__getitem__"):
         return metadata, None
-    if use_ema and "ema_params" in metadata:
+    root_keys = set(metadata.keys())
+    if use_ema and "ema_params" in root_keys:
         restore_key = "ema_params"
-    elif "params" in metadata:
+    elif "params" in root_keys:
         restore_key = "params"
     else:
         raise KeyError(f"Checkpoint missing 'params' and 'ema_params': {checkpoint_path}")
