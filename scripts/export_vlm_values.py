@@ -252,6 +252,13 @@ def main() -> None:
     parser.add_argument("--copy_wrist_to_right", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--lookahead", type=int, default=50, help="Optional oracle advantage horizon for exported metadata")
     parser.add_argument(
+        "--episode_ids",
+        nargs="+",
+        type=int,
+        default=None,
+        help="Optional episode indices to export; all frames are kept unless --terminal_only is also set.",
+    )
+    parser.add_argument(
         "--terminal_only",
         action=argparse.BooleanOptionalAction,
         default=False,
@@ -280,6 +287,18 @@ def main() -> None:
         human_col=args.human_col,
         adv_col=args.adv_col,
     )
+    if args.episode_ids is not None:
+        requested_episode_ids = set(args.episode_ids)
+        available_episode_ids = {request.episode_id for request in requests}
+        missing_episode_ids = sorted(requested_episode_ids - available_episode_ids)
+        if missing_episode_ids:
+            raise ValueError(f"Requested episode indices not found: {missing_episode_ids}")
+        requests = [request for request in requests if request.episode_id in requested_episode_ids]
+        selected_dataset_indices = [
+            int(dataset_index)
+            for request in requests
+            for dataset_index in request.dataset_row_indices.tolist()
+        ]
     if args.terminal_only:
         requests = [
             EpisodeExportRequest(
