@@ -123,7 +123,12 @@ def test_checkpoint_loader_enables_orbax_partial_restore(monkeypatch, tmp_path):
             captured["args"] = args
             return {"ema_params": {"weight": np.asarray([2.0], dtype=np.float32)}}
 
-    monkeypatch.setattr(ocp, "PyTreeCheckpointer", _FakeCheckpointer)
+    monkeypatch.setattr(ocp, "PyTreeCheckpointHandler", lambda: "partial-handler")
+    monkeypatch.setattr(
+        ocp,
+        "Checkpointer",
+        lambda handler: _FakeCheckpointer() if handler == "partial-handler" else None,
+    )
 
     params = label_advantage_from_vlm._load_checkpoint_params(
         tmp_path / "step_00000001",

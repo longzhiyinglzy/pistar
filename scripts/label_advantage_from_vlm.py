@@ -166,7 +166,9 @@ def _load_checkpoint_params(checkpoint_path: Path, *, use_ema: bool) -> dict:
     LOG.info(f"Loading checkpoint with {len(available_devices)} device(s) available")
     LOG.info(f"Target device for inference: {target_device}")
 
-    with ocp.PyTreeCheckpointer() as ckptr:
+    # BasePyTreeCheckpointHandler requires an exact tree match. The legacy
+    # PyTreeCheckpointHandler is required here for true partial restoration.
+    with ocp.Checkpointer(ocp.PyTreeCheckpointHandler()) as ckptr:
         # Load with explicit restore args to avoid sharding=None issues in newer JAX/Orbax.
         def _restore_with(restore_type: type[np.ndarray] | type[jax.Array]) -> dict:
             metadata = ckptr.metadata(str(checkpoint_path))
