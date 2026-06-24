@@ -251,6 +251,12 @@ def main() -> None:
     )
     parser.add_argument("--copy_wrist_to_right", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--lookahead", type=int, default=50, help="Optional oracle advantage horizon for exported metadata")
+    parser.add_argument(
+        "--terminal_only",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Export only the final frame of every episode for fast outcome diagnostics.",
+    )
     parser.add_argument("--max_frames", type=int, default=None, help="Optional debug cap; omit it to export every frame")
     args = parser.parse_args()
 
@@ -274,6 +280,19 @@ def main() -> None:
         human_col=args.human_col,
         adv_col=args.adv_col,
     )
+    if args.terminal_only:
+        requests = [
+            EpisodeExportRequest(
+                parquet_path=request.parquet_path,
+                episode_id=request.episode_id,
+                step_indices=request.step_indices[-1:],
+                dataset_row_indices=request.dataset_row_indices[-1:],
+                df=request.df.iloc[-1:].reset_index(drop=True),
+            )
+            for request in requests
+            if len(request.df) > 0
+        ]
+        selected_dataset_indices = [int(request.dataset_row_indices[-1]) for request in requests]
     if args.max_frames is not None:
         if args.max_frames <= 0:
             raise ValueError("--max_frames must be positive")
