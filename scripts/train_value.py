@@ -231,6 +231,30 @@ class TrainState:
     ema_params: nnx.State | None = None  
 
 
+def _map_train_state_arrays(state: TrainState, fn) -> TrainState:
+    """Apply a device/sharding transform to TrainState array fields."""
+
+    def map_tree(tree):
+        if tree is None:
+            return None
+        return jax.tree.map(
+            lambda value: fn(value) if hasattr(value, "shape") else value,
+            tree,
+            is_leaf=lambda value: hasattr(value, "shape"),
+        )
+
+    step = state.step
+    if not hasattr(step, "shape"):
+        step = jnp.asarray(step)
+    return TrainState(
+        step=fn(step),
+        params=map_tree(state.params),
+        model_def=state.model_def,
+        opt_state=map_tree(state.opt_state),
+        ema_params=map_tree(state.ema_params),
+    )
+
+
 FREEZE_MODES = ("none", "siglip_only", "all_backbones")
 
 
@@ -714,18 +738,16 @@ def main():
     if args.fsdp_devices > 1:
         logging.info("\033[1;36m应用FSDP分片到模型参数...\033[0m")
         with sharding.set_mesh(mesh):
-            train_state = jax.tree.map(
-                lambda x: sharding.apply_fsdp_sharding(mesh, x) if hasattr(x, 'shape') else x,
+            train_state = _map_train_state_arrays(
                 train_state,
-                is_leaf=lambda x: hasattr(x, 'shape')
+                lambda value: sharding.apply_fsdp_sharding(mesh, value),
             )
         logging.info("\033[1;32mFSDP分片完成\033[0m")
     else:
         # 单卡：复制到所有设备
-        train_state = jax.tree.map(
-            lambda x: jax.device_put(x, replicated_sharding), 
+        train_state = _map_train_state_arrays(
             train_state,
-            is_leaf=lambda x: hasattr(x, 'shape')
+            lambda value: jax.device_put(value, replicated_sharding),
         )
 
     @functools.partial(

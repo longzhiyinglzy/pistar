@@ -82,6 +82,28 @@ def _summarize_param_match(name: str, loaded_params: at.Params, ref_params: at.P
         logger.warning(console.warn(f"{name} shape mismatch keys (sample): {sample}"))
 
 
+def _require_param_match(name: str, loaded_params: at.Params, ref_params: at.Params) -> None:
+    """Reject partially loaded frozen backbones instead of training silently."""
+    flat_loaded = flax.traverse_util.flatten_dict(loaded_params, sep="/")
+    flat_ref = flax.traverse_util.flatten_dict(ref_params, sep="/")
+    missing = set(flat_ref) - set(flat_loaded)
+    shape_mismatch = {
+        key
+        for key in set(flat_ref) & set(flat_loaded)
+        if hasattr(flat_loaded[key], "shape")
+        and hasattr(flat_ref[key], "shape")
+        and flat_loaded[key].shape != flat_ref[key].shape
+    }
+    if missing or shape_mismatch:
+        raise ValueError(
+            f"{name} checkpoint is incompatible: matched "
+            f"{len(flat_ref) - len(missing)}/{len(flat_ref)}, "
+            f"shape_mismatch={len(shape_mismatch)}. "
+            f"Missing sample: {sorted(missing)[:10]}; "
+            f"shape mismatch sample: {sorted(shape_mismatch)[:10]}"
+        )
+
+
 def _select_subtree_by_overlap(loaded_params: at.Params, ref_params: at.Params, name: str) -> at.Params:
     """Select a nested subtree with best key overlap against ref params."""
     if not isinstance(loaded_params, Mapping):
@@ -160,6 +182,31 @@ def _maybe_resample_siglip_posemb(siglip_params: at.Params, ref_params: at.Param
 
 def _maybe_convert_gemma_ckpt_tree(tree: at.Params) -> at.Params:
     """Convert Gemma checkpoint tree to nested format if needed."""
+    # Official Gemma checkpoints can restore as a flat mapping whose keys
+    # contain paths such as "transformer/layer_0/attn". Convert this layout
+    # directly rather than relying on version-sensitive etils TreeAPI helpers.
+    if isinstance(tree, Mapping):
+        try:
+            flat = flax.traverse_util.flatten_dict(tree, sep="/")
+            transformer_flat = {}
+            for key, value in flat.items():
+                if not key.startswith("transformer/"):
+                    continue
+                key = key.removeprefix("transformer/")
+                if re.fullmatch(r"layer_\d+/mlp/(?:gating_einsum|linear)/w", key):
+                    key = key.removesuffix("/w")
+                transformer_flat[key] = value
+            if transformer_flat:
+                logger.info(
+                    console.info(
+                        f"Gemma params: converted flat transformer checkpoint "
+                        f"({len(transformer_flat)} leaves)"
+                    )
+                )
+                return flax.traverse_util.unflatten_dict(transformer_flat, sep="/")
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning(console.warn(f"Gemma flat checkpoint convert failed: {exc}"))
+
     if gm_ckpt is None:
         return tree
     try:
@@ -344,6 +391,7 @@ class ValueModelWeightLoader(WeightLoader):
             siglip_params = _maybe_resample_siglip_posemb(siglip_params, params["img"])
         if isinstance(params, Mapping) and "img" in params:
             _summarize_param_match("SigLIP", siglip_params, params["img"])
+            _require_param_match("SigLIP", siglip_params, params["img"])
 
         logger.info(console.info("加载 Gemma 3 270M 权重 (from local Orbax checkpoint)..."))
         gemma_checkpoint_dir = (
@@ -389,6 +437,7 @@ class ValueModelWeightLoader(WeightLoader):
             raise
         if isinstance(params, Mapping) and "llm" in params:
             _summarize_param_match("Gemma", gemma_params, params["llm"])
+            _require_param_match("Gemma", gemma_params, params["llm"])
 
         loaded_params = {
             "img": siglip_params,
