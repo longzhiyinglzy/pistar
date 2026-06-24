@@ -237,6 +237,11 @@ class TrainState:
     ema_params: nnx.State | None = None  
 
 
+def _as_host_int(value) -> int:
+    """Convert a scalar JAX value before passing it to Python utilities."""
+    return int(jax.device_get(value))
+
+
 def _map_train_state_arrays(state: TrainState, fn) -> TrainState:
     """Apply a device/sharding transform to TrainState array fields."""
 
@@ -807,7 +812,7 @@ def main():
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
     # 从恢复的步数开始训练
-    start_step = train_state.step
+    start_step = _as_host_int(train_state.step)
     total_steps = args.num_train_steps
     pbar = tqdm.tqdm(
         range(start_step, total_steps),
@@ -843,7 +848,7 @@ def main():
     logging.info("\033[1;36mJIT编译预热...\033[0m")
     observation, value = prefetch_batches[0]
     with sharding.set_mesh(mesh):
-        _ = jit_train_step(
+        warmup_result = jit_train_step(
             train_state.params,
             train_state.model_def,
             train_state.opt_state,
@@ -853,6 +858,8 @@ def main():
             observation,
             value,
         )
+        jax.block_until_ready(warmup_result)
+        del warmup_result
     logging.info("\033[1;32mJIT编译完成，开始训练...\033[0m")
     
     # 重新初始化数据迭代器

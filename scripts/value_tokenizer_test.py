@@ -30,3 +30,10 @@ def test_train_value_tokenizer_accepts_transform_arguments():
 
 def test_label_value_tokenizer_accepts_transform_arguments():
     _check_tokenizer(label_advantage_from_vlm.GemmaValueTokenizer(max_len=6))
+
+
+def test_jax_step_converts_to_python_int_for_tqdm():
+    step = train_value.jnp.asarray(7)
+
+    assert train_value._as_host_int(step) == 7
+    assert isinstance(train_value._as_host_int(step), int)
