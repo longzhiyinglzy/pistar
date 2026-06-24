@@ -183,7 +183,11 @@ def _load_checkpoint_params(checkpoint_path: Path, *, use_ema: bool) -> dict:
             )
             return ckptr.restore(
                 str(checkpoint_path),
-                ocp.args.PyTreeRestore(item=item, restore_args=restore_args),
+                ocp.args.PyTreeRestore(
+                    item=item,
+                    restore_args=restore_args,
+                    transforms={},
+                ),
             )
 
         try:

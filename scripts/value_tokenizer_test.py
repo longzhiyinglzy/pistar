@@ -1,4 +1,5 @@
 import numpy as np
+import orbax.checkpoint as ocp
 
 from scripts import label_advantage_from_vlm
 from scripts import train_value
@@ -95,3 +96,36 @@ def test_checkpoint_loader_selects_only_requested_parameter_tree(tmp_path):
     assert ema_key == "ema_params"
     assert regular == {"params": {"weight": "regular"}}
     assert regular_key == "params"
+
+
+def test_checkpoint_loader_enables_orbax_partial_restore(monkeypatch, tmp_path):
+    captured = {}
+
+    class _FakeCheckpointer:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc_value, traceback):
+            return False
+
+        def metadata(self, _path):
+            return _TreeMetadataLike(
+                {
+                    "params": {"weight": "regular-metadata"},
+                    "ema_params": {"weight": "ema-metadata"},
+                }
+            )
+
+        def restore(self, _path, args):
+            captured["args"] = args
+            return {"ema_params": {"weight": np.asarray([2.0], dtype=np.float32)}}
+
+    monkeypatch.setattr(ocp, "PyTreeCheckpointer", _FakeCheckpointer)
+
+    params = label_advantage_from_vlm._load_checkpoint_params(
+        tmp_path / "step_00000001",
+        use_ema=True,
+    )
+
+    assert captured["args"].transforms == {}
+    np.testing.assert_array_equal(np.asarray(params["weight"]), [2.0])
