@@ -22,6 +22,7 @@ T_co = TypeVar("T_co", covariant=True)
 
 def _hf_transform_to_torch_allow_dict(items_dict: dict):
     """HuggingFace -> torch 转换，同时允许 image bytes dict 原样通过。"""
+    import io
     from PIL import Image as PILImage
     try:
         from torchvision import transforms as tv_transforms
@@ -29,18 +30,29 @@ def _hf_transform_to_torch_allow_dict(items_dict: dict):
         to_tensor = tv_transforms.ToTensor()
     except Exception:
         to_tensor = None
+    def convert_image(img):
+        if to_tensor is not None:
+            return to_tensor(img)
+        return torch.tensor(np.asarray(img)).permute(2, 0, 1) / 255.0
+
+    def decode_image_dict(item: dict):
+        if item.get("bytes") is not None:
+            with PILImage.open(io.BytesIO(item["bytes"])) as img:
+                return convert_image(img.convert("RGB"))
+        if item.get("path") is not None:
+            with PILImage.open(item["path"]) as img:
+                return convert_image(img.convert("RGB"))
+        return item
+
     for key in items_dict:
         first_item = items_dict[key][0]
         if isinstance(first_item, PILImage.Image):
-            if to_tensor is None:
-                items_dict[key] = [torch.tensor(np.asarray(img)).permute(2, 0, 1) / 255.0 for img in items_dict[key]]
-            else:
-                items_dict[key] = [to_tensor(img) for img in items_dict[key]]
+            items_dict[key] = [convert_image(img) for img in items_dict[key]]
         elif first_item is None:
             pass
         elif isinstance(first_item, dict):
-            # 例如 {"bytes": ...} 或 {"path": ...}，交给后续 ValueInputs 解析
-            items_dict[key] = items_dict[key]
+            if "bytes" in first_item or "path" in first_item:
+                items_dict[key] = [decode_image_dict(item) for item in items_dict[key]]
         else:
             items_dict[key] = [x if isinstance(x, str) else torch.tensor(x) for x in items_dict[key]]
     return items_dict
