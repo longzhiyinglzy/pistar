@@ -26,6 +26,8 @@ class PiperInputs(transforms.DataTransformFn):
     
     Expected inputs:
     - images: dict with "cam_high", "cam_wrist", and optional "cam_wrist1"
+      or "observation/images/cam_head", "observation/images/cam_wrist",
+      and optional "observation/images/cam_side"
     - state: [7] (6 joints + 1 gripper)
     - actions: [action_horizon, 7]
     """
@@ -33,7 +35,8 @@ class PiperInputs(transforms.DataTransformFn):
     EXPECTED_CAMERAS: ClassVar[tuple[str, ...]] = ("cam_high", "cam_wrist", "cam_wrist1")
 
     def __call__(self, data: dict) -> dict:
-        state = np.asarray(data["state"], dtype=np.float32)
+        state_key = "state" if "state" in data else "observation/state"
+        state = np.asarray(data[state_key], dtype=np.float32)
 
         def convert_image(img):
             img = np.asarray(img)
@@ -44,8 +47,21 @@ class PiperInputs(transforms.DataTransformFn):
             return img
 
         in_images = data["images"]
+
+        def get_image(*keys):
+            for key in keys:
+                if key in in_images:
+                    return in_images[key]
+            return None
         
-        base_image = convert_image(in_images["cam_high"])
+        base_raw = get_image("cam_high", "observation/images/cam_head")
+        if base_raw is None:
+            raise KeyError(
+                "Missing Piper base camera. Expected one of: "
+                "cam_high, observation/images/cam_head"
+            )
+
+        base_image = convert_image(base_raw)
         
         images = {
             "base_0_rgb": base_image,
@@ -54,15 +70,17 @@ class PiperInputs(transforms.DataTransformFn):
             "base_0_rgb": np.True_,
         }
 
-        if "cam_wrist" in in_images:
-            images["left_wrist_0_rgb"] = convert_image(in_images["cam_wrist"])
+        wrist_raw = get_image("cam_wrist", "observation/images/cam_wrist")
+        if wrist_raw is not None:
+            images["left_wrist_0_rgb"] = convert_image(wrist_raw)
             image_masks["left_wrist_0_rgb"] = np.True_
         else:
             images["left_wrist_0_rgb"] = np.zeros_like(base_image)
             image_masks["left_wrist_0_rgb"] = np.False_
 
-        if "cam_wrist1" in in_images:
-            images["right_wrist_0_rgb"] = convert_image(in_images["cam_wrist1"])
+        side_raw = get_image("cam_wrist1", "observation/images/cam_side")
+        if side_raw is not None:
+            images["right_wrist_0_rgb"] = convert_image(side_raw)
             image_masks["right_wrist_0_rgb"] = np.True_
         else:
             images["right_wrist_0_rgb"] = np.zeros_like(base_image)
