@@ -1483,7 +1483,7 @@ _CONFIGS = [
         data=LeRobotPiperDataConfig(
             repo_id="piper/assemble_block1_pistar_30hz_3view",
             base_config=DataConfig(prompt_from_task=True),
-            extra_delta_transform=False,
+            extra_delta_transform=True,
             side_image_key="side_image",
         ),
         batch_size=32,
@@ -1511,7 +1511,7 @@ _CONFIGS = [
         data=LeRobotPiperDataConfig(
             repo_id="piper/assemble_block1_pistar_30hz_3view",
             base_config=DataConfig(prompt_from_task=True),
-            extra_delta_transform=False,
+            extra_delta_transform=True,
             adv_ind_dropout=False,
             side_image_key="side_image",
         ),
