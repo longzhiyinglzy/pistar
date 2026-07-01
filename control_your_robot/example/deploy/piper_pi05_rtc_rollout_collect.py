@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Collect autonomous pi0.5/PiStar RTC rollouts as LeRobot RL episodes.
+"""Collect pi0.5/PiStar RTC rollouts as LeRobot RL episodes.
 
 Typical use:
   1. Start an OpenPI websocket policy server in another terminal.
@@ -12,9 +12,10 @@ Typical use:
        Enter: discard by default, configurable with --enter-label
        q / Esc: quit
 
-The saved frames are autonomous policy frames, so ``intervention`` is always 0.
-This is meant for the high-initial-success setting where pi0.5 rollouts are used
-to build the first success/failure value-function dataset.
+By default the saved frames are autonomous policy frames. If SpaceMouse
+intervention is enabled, the first non-deadzone SpaceMouse command or gripper
+button switches the rest of the episode into human intervention mode and saves
+``intervention=1`` for those subsequent frames.
 """
 
 from __future__ import annotations
@@ -72,6 +73,12 @@ DEFAULT_RESET_JOINT = [
 DEFAULT_CAM_HEAD_SERIAL = "323522063521"
 DEFAULT_CAM_SIDE_SERIAL = "349222061138"
 DEFAULT_CAM_WRIST_SERIAL = "409122272461"
+DEFAULT_SPACEMOUSE_DEADZONE = 30.0
+DEFAULT_SPACEMOUSE_MAX_VALUE = 350.0
+DEFAULT_SPACEMOUSE_TRANS_MOTION = 0.002
+DEFAULT_SPACEMOUSE_ROT_SCALE = 0.2
+DEFAULT_SPACEMOUSE_OPEN_GRIPPER = 0.6
+DEFAULT_SPACEMOUSE_CLOSE_GRIPPER = 0.0
 
 
 class RTCAttentionSchedule(enum.Enum):
@@ -145,6 +152,26 @@ class ExternalPiperRuntime:
     cam_head: object
     cam_wrist: object
     cam_side: object | None
+
+
+@dataclass
+class SpaceMouseInterventionRuntime:
+    controller: object
+    active: bool = False
+    prev_left_button: int = 0
+    prev_right_button: int = 0
+    manual_gripper: float = DEFAULT_SPACEMOUSE_CLOSE_GRIPPER
+
+    def reset_episode(self, *, current_gripper: float, keep_active: bool = False) -> None:
+        self.active = bool(keep_active)
+        self.manual_gripper = float(current_gripper)
+        try:
+            data = self.controller.get_state()
+            self.prev_left_button = int(data.get("left_button", 0))
+            self.prev_right_button = int(data.get("right_button", 0))
+        except Exception:
+            self.prev_left_button = 0
+            self.prev_right_button = 0
 
 
 class KeyboardPoller:
@@ -325,6 +352,26 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--skip-non-finite", type=_bool_arg, default=True)
     parser.add_argument("--status-interval-s", type=float, default=1.0)
 
+    parser.add_argument(
+        "--enable-spacemouse-intervention",
+        action="store_true",
+        help="Allow SpaceMouse takeover. Once triggered, the rest of the episode is saved as intervention=1.",
+    )
+    parser.add_argument("--spacemouse-device-path", default=None)
+    parser.add_argument("--spacemouse-grab-device", type=_bool_arg, default=True)
+    parser.add_argument(
+        "--sticky-intervention",
+        type=_bool_arg,
+        default=True,
+        help="Keep intervention=1 after the first SpaceMouse/home intervention in an episode.",
+    )
+    parser.add_argument("--spacemouse-deadzone", type=float, default=DEFAULT_SPACEMOUSE_DEADZONE)
+    parser.add_argument("--spacemouse-max-value", type=float, default=DEFAULT_SPACEMOUSE_MAX_VALUE)
+    parser.add_argument("--spacemouse-trans-motion", type=float, default=DEFAULT_SPACEMOUSE_TRANS_MOTION)
+    parser.add_argument("--spacemouse-rot-scale", type=float, default=DEFAULT_SPACEMOUSE_ROT_SCALE)
+    parser.add_argument("--spacemouse-open-gripper", type=float, default=DEFAULT_SPACEMOUSE_OPEN_GRIPPER)
+    parser.add_argument("--spacemouse-close-gripper", type=float, default=DEFAULT_SPACEMOUSE_CLOSE_GRIPPER)
+
     parser.add_argument("--rtc-enabled", type=_bool_arg, default=True)
     parser.add_argument("--rtc-execution-horizon", type=int, default=10)
     parser.add_argument("--rtc-max-guidance-weight", type=float, default=10.0)
@@ -381,6 +428,10 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError("--rtc-prefetch-threshold must be at least 1.")
     if args.rtc_inference_delay_steps < 0:
         raise ValueError("--rtc-inference-delay-steps must be non-negative.")
+    if args.spacemouse_deadzone < 0 or args.spacemouse_deadzone >= 100:
+        raise ValueError("--spacemouse-deadzone must be in [0, 100).")
+    if args.spacemouse_max_value <= 0:
+        raise ValueError("--spacemouse-max-value must be positive.")
 
 
 def setup_control_repo(control_repo_path: str) -> Path:
@@ -474,6 +525,29 @@ def create_external_runtime(args: argparse.Namespace) -> ExternalPiperRuntime:
     )
 
 
+def create_spacemouse_runtime(args: argparse.Namespace) -> SpaceMouseInterventionRuntime:
+    setup_control_repo(args.control_repo_path)
+    try:
+        from robot.controller.SpaceMouse_controller import SpaceMouseController
+    except Exception as exc:
+        raise ImportError(
+            f"Failed to import SpaceMouseController from {args.control_repo_path}. "
+            "Check the control_your_robot installation and SpaceMouse dependencies."
+        ) from exc
+
+    controller = SpaceMouseController(
+        name="spacemouse",
+        initial_gripper=float(args.spacemouse_close_gripper),
+    )
+    if hasattr(controller, "set_collect_info"):
+        controller.set_collect_info(["raw", "left_button", "right_button"])
+    controller.set_up(device_path=args.spacemouse_device_path, grab_device=bool(args.spacemouse_grab_device))
+    return SpaceMouseInterventionRuntime(
+        controller=controller,
+        manual_gripper=float(args.spacemouse_close_gripper),
+    )
+
+
 def cleanup_external_runtime(runtime: ExternalPiperRuntime | None) -> None:
     if runtime is None:
         return
@@ -483,6 +557,16 @@ def cleanup_external_runtime(runtime: ExternalPiperRuntime | None) -> None:
                 sensor.cleanup()
             except Exception:
                 pass
+
+
+def cleanup_spacemouse_runtime(runtime: SpaceMouseInterventionRuntime | None) -> None:
+    if runtime is None:
+        return
+    if hasattr(runtime.controller, "close"):
+        try:
+            runtime.controller.close()
+        except Exception:
+            pass
 
 
 def _to_scalar(value):
@@ -596,6 +680,81 @@ def action_to_targets(action: np.ndarray, args: argparse.Namespace) -> tuple[np.
     return target6, gripper
 
 
+def _map_spacemouse_axis_to_delta(percentage: float, *, deadzone: float, motion: float) -> float:
+    if abs(percentage) <= deadzone:
+        return 0.0
+    if percentage > 0:
+        normalized = (percentage - deadzone) / (100.0 - deadzone)
+        return -normalized * motion
+    normalized = (abs(percentage) - deadzone) / (100.0 - deadzone)
+    return normalized * motion
+
+
+def spacemouse_raw_to_delta_qpos(raw: np.ndarray, args: argparse.Namespace) -> np.ndarray:
+    raw = np.asarray(raw, dtype=np.float64).reshape(-1)
+    if raw.shape[0] < 6:
+        padded = np.zeros((6,), dtype=np.float64)
+        padded[: raw.shape[0]] = raw
+        raw = padded
+    raw = raw[:6]
+    percentages = (raw / float(args.spacemouse_max_value)) * 100.0
+    deadzone = float(args.spacemouse_deadzone)
+    trans_motion = float(args.spacemouse_trans_motion)
+    rot_motion = trans_motion * float(args.spacemouse_rot_scale)
+
+    # Match the user's existing SpaceMouse -> Piper qpos mapping.
+    distance_x = _map_spacemouse_axis_to_delta(percentages[1], deadzone=deadzone, motion=trans_motion)
+    distance_y = _map_spacemouse_axis_to_delta(percentages[0], deadzone=deadzone, motion=trans_motion)
+    distance_z = _map_spacemouse_axis_to_delta(percentages[2], deadzone=deadzone, motion=trans_motion)
+    distance_ry = _map_spacemouse_axis_to_delta(percentages[3], deadzone=deadzone, motion=rot_motion)
+    distance_rx = _map_spacemouse_axis_to_delta(percentages[4], deadzone=deadzone, motion=rot_motion)
+    distance_rz = _map_spacemouse_axis_to_delta(percentages[5], deadzone=deadzone, motion=rot_motion)
+    return np.asarray([distance_x, distance_y, distance_z, distance_rx, distance_ry, distance_rz], dtype=np.float64)
+
+
+def get_spacemouse_action(
+    spacemouse: SpaceMouseInterventionRuntime,
+    robot_data: list[dict],
+    args: argparse.Namespace,
+) -> tuple[np.ndarray | None, bool, dict]:
+    master_data = spacemouse.controller.get_state()
+    raw = np.asarray(master_data.get("raw", np.zeros((6,), dtype=np.float64)), dtype=np.float64).reshape(-1)[:6]
+    left_button = int(master_data.get("left_button", 0))
+    right_button = int(master_data.get("right_button", 0))
+    left_edge = left_button == 1 and spacemouse.prev_left_button == 0
+    right_edge = right_button == 1 and spacemouse.prev_right_button == 0
+    spacemouse.prev_left_button = left_button
+    spacemouse.prev_right_button = right_button
+
+    controllers = robot_data[0]
+    arm_state = controllers["left_arm"]
+    current_qpos = np.asarray(arm_state["qpos"], dtype=np.float64).reshape(-1)
+    if current_qpos.shape != (6,):
+        raise ValueError(f"expected 6D qpos for SpaceMouse intervention, got {current_qpos.shape}")
+    current_gripper = float(np.asarray(arm_state["gripper"]).reshape(-1)[0])
+
+    if not spacemouse.active:
+        spacemouse.manual_gripper = current_gripper
+
+    if left_edge:
+        spacemouse.manual_gripper = float(args.spacemouse_open_gripper)
+    if right_edge:
+        spacemouse.manual_gripper = float(args.spacemouse_close_gripper)
+
+    delta_qpos = spacemouse_raw_to_delta_qpos(raw, args)
+    has_motion = bool(np.any(np.abs(delta_qpos) > 0.0))
+    should_activate = has_motion or left_edge or right_edge
+    if should_activate:
+        spacemouse.active = True
+    elif not spacemouse.active:
+        return None, False, master_data
+
+    target_qpos = current_qpos + delta_qpos
+    target_gripper = float(np.clip(spacemouse.manual_gripper, GRIPPER_LIMIT[0], GRIPPER_LIMIT[1]))
+    action = np.concatenate([target_qpos, np.asarray([target_gripper], dtype=np.float64)], axis=0)
+    return action, True, master_data
+
+
 def execute_action(runtime: ExternalPiperRuntime, action: np.ndarray, args: argparse.Namespace) -> None:
     target6, target_gripper = action_to_targets(action, args)
     if args.state_source == "joint":
@@ -603,6 +762,14 @@ def execute_action(runtime: ExternalPiperRuntime, action: np.ndarray, args: argp
     else:
         runtime.controller.set_position(target6)
     runtime.controller.set_gripper(target_gripper)
+
+
+def execute_spacemouse_action(runtime: ExternalPiperRuntime, action: np.ndarray) -> None:
+    action7 = np.asarray(action, dtype=np.float64).reshape(-1)[:7]
+    if action7.shape[0] < 7:
+        raise ValueError(f"expected 7D SpaceMouse action, got shape={action7.shape}")
+    runtime.controller.set_position(action7[:6])
+    runtime.controller.set_gripper(float(np.clip(action7[6], GRIPPER_LIMIT[0], GRIPPER_LIMIT[1])))
 
 
 def reset_runtime(runtime: ExternalPiperRuntime, args: argparse.Namespace) -> None:
@@ -698,7 +865,7 @@ def save_or_discard(
     )
     print(
         f"[episode] saved {frame_count} frames, success={success}, "
-        f"intervention=0, adv_ind={args.save_adv_ind}",
+        f"intervention={int(np.sum(getattr(collector, 'intervention_flags', [])))}, adv_ind={args.save_adv_ind}",
         flush=True,
     )
     stats.add_saved(success=success)
@@ -1059,6 +1226,7 @@ def run(args: argparse.Namespace) -> None:
 
     collector = None
     runtime: ExternalPiperRuntime | None = None
+    spacemouse: SpaceMouseInterventionRuntime | None = None
     keyboard = KeyboardPoller()
 
     chunk_client = OpenPiChunkClient(
@@ -1087,13 +1255,20 @@ def run(args: argparse.Namespace) -> None:
         flush=True,
     )
     print(f"RTC: enabled={rtc_cfg.enabled}, exec_horizon={rtc_cfg.execution_horizon}, delay={rtc_cfg.inference_delay_steps}", flush=True)
-    print("keys during rollout: s=success, f=failure, r=discard, q=quit", flush=True)
+    print(
+        "SpaceMouse intervention: "
+        f"enabled={args.enable_spacemouse_intervention}, sticky={args.sticky_intervention}",
+        flush=True,
+    )
+    print("keys during rollout: s=success, f=failure, r=discard, h=home/intervene, q=quit", flush=True)
     print(rollout_stats.format_line(prefix="[existing]"), flush=True)
     print("=" * 72, flush=True)
 
     try:
         print("[1/3] init robot", flush=True)
         runtime = create_external_runtime(args)
+        if args.enable_spacemouse_intervention:
+            spacemouse = create_spacemouse_runtime(args)
         collector = create_rl_collector(args)
 
         print("[2/3] connect policy server", flush=True)
@@ -1116,15 +1291,36 @@ def run(args: argparse.Namespace) -> None:
             rtc_policy = AsyncRTCPolicy(chunk_client, rtc_cfg, control_dt=args.control_dt)
             bootstrapped = False
             worker_started = False
+            policy_stopped_for_intervention = False
             outcome = None
             next_tick = time.perf_counter()
             last_status_t = time.monotonic()
             frames_since_status = 0
             policy_frames = 0
+            intervention_frames = 0
+            if spacemouse is not None:
+                current_state = runtime.controller.get_state()
+                current_gripper = float(np.asarray(current_state.get("gripper", args.reset_gripper)).reshape(-1)[0])
+                spacemouse.reset_episode(current_gripper=current_gripper)
 
             try:
                 while outcome is None:
                     key = keyboard.read_key()
+                    if key == "h":
+                        print("\n[home] keyboard h -> home/reset and mark subsequent frames as intervention", flush=True)
+                        if spacemouse is not None:
+                            spacemouse.active = True
+                        if not policy_stopped_for_intervention:
+                            rtc_policy.queue.clear()
+                            rtc_policy.stop()
+                            policy_stopped_for_intervention = True
+                        reset_runtime(runtime, args)
+                        if spacemouse is not None:
+                            spacemouse.reset_episode(current_gripper=float(args.reset_gripper), keep_active=True)
+                        keyboard.drain()
+                        next_tick = time.perf_counter()
+                        continue
+
                     outcome = outcome_from_key(key, enter_label=args.enter_label)
                     if outcome is not None:
                         break
@@ -1143,31 +1339,64 @@ def run(args: argparse.Namespace) -> None:
                             continue
                         raise ValueError(msg)
 
-                    if rtc_cfg.enabled:
-                        rtc_policy.update_observation(obs)
-                        if not bootstrapped:
-                            rtc_policy.bootstrap(obs)
-                            bootstrapped = True
-                            if not worker_started:
-                                rtc_policy.start()
-                                worker_started = True
-                    elif rtc_policy.queue.is_empty():
-                        rtc_policy.bootstrap(obs)
+                    action_source = "policy"
+                    is_intervention = False
+                    manual_action = None
+                    if spacemouse is not None:
+                        manual_action, is_intervention, _ = get_spacemouse_action(spacemouse, robot_data, args)
+                        if is_intervention and not bool(args.sticky_intervention):
+                            spacemouse.active = False
 
-                    action = rtc_policy.pop_action(hold_action=obs.state7)
-                    if action is None:
-                        logging.warning("RTC queue underflow with no hold action available; skipping step.")
-                    elif not np.isfinite(action).all():
-                        msg = f"Policy returned non-finite action: {action}"
-                        if args.skip_non_finite:
-                            logging.error(msg)
+                    if is_intervention:
+                        action_source = "spacemouse"
+                        if not policy_stopped_for_intervention:
+                            print(
+                                f"\n[intervention] SpaceMouse takeover at frame {len(collector.episode_buffer)}; "
+                                "subsequent frames will be saved with intervention=1",
+                                flush=True,
+                            )
+                            rtc_policy.queue.clear()
+                            rtc_policy.stop()
+                            policy_stopped_for_intervention = True
+                        if manual_action is None:
+                            manual_action = obs.state7
+                        if not np.isfinite(manual_action).all():
+                            msg = f"SpaceMouse returned non-finite action: {manual_action}"
+                            if args.skip_non_finite:
+                                logging.error(msg)
+                            else:
+                                raise ValueError(msg)
                         else:
-                            raise ValueError(msg)
+                            execute_spacemouse_action(runtime, manual_action)
                     else:
-                        execute_action(runtime, action, args)
+                        if rtc_cfg.enabled:
+                            rtc_policy.update_observation(obs)
+                            if not bootstrapped:
+                                rtc_policy.bootstrap(obs)
+                                bootstrapped = True
+                                if not worker_started:
+                                    rtc_policy.start()
+                                    worker_started = True
+                        elif rtc_policy.queue.is_empty():
+                            rtc_policy.bootstrap(obs)
 
-                    collector.collect(robot_data[0], robot_data[1], is_intervention=False)
-                    policy_frames += 1
+                        action = rtc_policy.pop_action(hold_action=obs.state7)
+                        if action is None:
+                            logging.warning("RTC queue underflow with no hold action available; skipping step.")
+                        elif not np.isfinite(action).all():
+                            msg = f"Policy returned non-finite action: {action}"
+                            if args.skip_non_finite:
+                                logging.error(msg)
+                            else:
+                                raise ValueError(msg)
+                        else:
+                            execute_action(runtime, action, args)
+
+                    collector.collect(robot_data[0], robot_data[1], is_intervention=is_intervention)
+                    if action_source == "spacemouse":
+                        intervention_frames += 1
+                    else:
+                        policy_frames += 1
                     frames_since_status += 1
 
                     if args.max_step > 0 and len(collector.episode_buffer) >= args.max_step:
@@ -1182,6 +1411,7 @@ def run(args: argparse.Namespace) -> None:
                         latency_str = "None" if latency is None else f"{latency * 1000.0:.1f}ms"
                         print(
                             f"[rollout] frames={len(collector.episode_buffer)} "
+                            f"policy={policy_frames} intervention={intervention_frames} "
                             f"rate={frames_since_status / elapsed:.1f}Hz "
                             f"queue={rtc_policy.queue.size()} "
                             f"latency={latency_str} delay={rtc_policy.last_inference_delay_steps}",
@@ -1202,7 +1432,10 @@ def run(args: argparse.Namespace) -> None:
 
             if outcome == "quit":
                 break
-            print(f"[episode] collected policy frames={policy_frames}", flush=True)
+            print(
+                f"[episode] collected policy frames={policy_frames}, intervention frames={intervention_frames}",
+                flush=True,
+            )
             if not save_or_discard(collector, outcome, args, rollout_stats):
                 break
 
@@ -1211,6 +1444,7 @@ def run(args: argparse.Namespace) -> None:
             print(f"\n[done] dataset path: {collector.get_dataset_path()}", flush=True)
     finally:
         keyboard.close()
+        cleanup_spacemouse_runtime(spacemouse)
         cleanup_external_runtime(runtime)
 
 
