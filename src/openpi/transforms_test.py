@@ -78,6 +78,26 @@ def test_tokenize_prompt():
     assert np.allclose(tok_mask, data["tokenized_prompt_mask"])
 
 
+def test_tokenize_prompt_adv_guidance_outputs_uncond_tokens():
+    class FakeTokenizer:
+        def tokenize(self, prompt, state=None, adv_ind=None, adv_ind_dropout=True):
+            del prompt, state, adv_ind_dropout
+            value = 1 if adv_ind is not None else 0
+            return np.asarray([value], dtype=np.int32), np.asarray([True])
+
+    transform = _transforms.TokenizePrompt(
+        FakeTokenizer(),
+        adv_ind_input=True,
+        adv_guidance_input=True,
+    )
+
+    data = transform({"prompt": "pick", "adv_ind": "positive", "state": np.zeros(7, dtype=np.float32)})
+
+    assert np.allclose(data["tokenized_prompt"], np.asarray([1], dtype=np.int32))
+    assert np.allclose(data["tokenized_prompt_uncond"], np.asarray([0], dtype=np.int32))
+    assert np.allclose(data["tokenized_prompt_uncond_mask"], np.asarray([True]))
+
+
 def test_tokenize_no_prompt():
     transform = _transforms.TokenizePrompt(_tokenizer.PaligemmaTokenizer())
 

@@ -140,6 +140,8 @@ class ModelTransformFactory(GroupFactory):
                             discrete_state_input=model_config.discrete_state_input,
                             adv_ind_input=model_config.pistar,
                             adv_ind_dropout=self.adv_ind_dropout,
+                            adv_guidance_input=model_config.pistar
+                            and getattr(model_config, "adv_guidance_beta", 1.0) != 1.0,
                         ),
                         _transforms.PadStatesAndActions(model_config.action_dim),
                     ],
@@ -1507,7 +1509,13 @@ _CONFIGS = [
     TrainConfig(
         name="pi05_star_assemble_blocks_h50_from_pi05_infer",
         project_name="pistar",
-        model=pi0_config.Pi0Config(pi05=True, pistar=True, action_horizon=50, discrete_state_input=False),
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            pistar=True,
+            action_horizon=50,
+            discrete_state_input=False,
+            adv_guidance_beta=2.0,
+        ),
         data=LeRobotPiperDataConfig(
             repo_id="piper/assemble_block1_pistar_30hz_3view",
             base_config=DataConfig(prompt_from_task=True),
