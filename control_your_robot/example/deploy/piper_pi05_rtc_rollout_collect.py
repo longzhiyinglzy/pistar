@@ -161,12 +161,14 @@ class SpaceMouseInterventionRuntime:
     prev_left_button: int = 0
     prev_right_button: int = 0
     manual_gripper: float = DEFAULT_SPACEMOUSE_CLOSE_GRIPPER
+    last_sent_gripper: float = DEFAULT_SPACEMOUSE_CLOSE_GRIPPER
 
     def reset_episode(self, *, current_gripper: float, keep_active: bool = False) -> None:
         self.active = bool(keep_active)
         self.manual_gripper = float(current_gripper)
+        self.last_sent_gripper = float(current_gripper)
         try:
-            data = self.controller.get_state()
+            data = self.controller.get()
             self.prev_left_button = int(data.get("left_button", 0))
             self.prev_right_button = int(data.get("right_button", 0))
         except Exception:
@@ -716,8 +718,8 @@ def get_spacemouse_action(
     spacemouse: SpaceMouseInterventionRuntime,
     robot_data: list[dict],
     args: argparse.Namespace,
-) -> tuple[np.ndarray | None, bool, dict]:
-    master_data = spacemouse.controller.get_state()
+) -> tuple[np.ndarray | None, bool, bool, dict]:
+    master_data = spacemouse.controller.get()
     raw = np.asarray(master_data.get("raw", np.zeros((6,), dtype=np.float64)), dtype=np.float64).reshape(-1)[:6]
     left_button = int(master_data.get("left_button", 0))
     right_button = int(master_data.get("right_button", 0))
@@ -743,16 +745,22 @@ def get_spacemouse_action(
 
     delta_qpos = spacemouse_raw_to_delta_qpos(raw, args)
     has_motion = bool(np.any(np.abs(delta_qpos) > 0.0))
+    gripper_changed = bool(abs(spacemouse.manual_gripper - spacemouse.last_sent_gripper) > 1e-6)
     should_activate = has_motion or left_edge or right_edge
     if should_activate:
         spacemouse.active = True
     elif not spacemouse.active:
-        return None, False, master_data
+        return None, False, False, master_data
+
+    should_send = has_motion or gripper_changed
+    if not should_send:
+        return None, True, False, master_data
 
     target_qpos = current_qpos + delta_qpos
     target_gripper = float(np.clip(spacemouse.manual_gripper, GRIPPER_LIMIT[0], GRIPPER_LIMIT[1]))
+    spacemouse.last_sent_gripper = target_gripper
     action = np.concatenate([target_qpos, np.asarray([target_gripper], dtype=np.float64)], axis=0)
-    return action, True, master_data
+    return action, True, True, master_data
 
 
 def execute_action(runtime: ExternalPiperRuntime, action: np.ndarray, args: argparse.Namespace) -> None:
@@ -1341,9 +1349,14 @@ def run(args: argparse.Namespace) -> None:
 
                     action_source = "policy"
                     is_intervention = False
+                    should_execute_manual = False
                     manual_action = None
                     if spacemouse is not None:
-                        manual_action, is_intervention, _ = get_spacemouse_action(spacemouse, robot_data, args)
+                        manual_action, is_intervention, should_execute_manual, _ = get_spacemouse_action(
+                            spacemouse,
+                            robot_data,
+                            args,
+                        )
                         if is_intervention and not bool(args.sticky_intervention):
                             spacemouse.active = False
 
@@ -1358,9 +1371,9 @@ def run(args: argparse.Namespace) -> None:
                             rtc_policy.queue.clear()
                             rtc_policy.stop()
                             policy_stopped_for_intervention = True
-                        if manual_action is None:
-                            manual_action = obs.state7
-                        if not np.isfinite(manual_action).all():
+                        if manual_action is None or not should_execute_manual:
+                            pass
+                        elif not np.isfinite(manual_action).all():
                             msg = f"SpaceMouse returned non-finite action: {manual_action}"
                             if args.skip_non_finite:
                                 logging.error(msg)
