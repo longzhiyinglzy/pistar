@@ -1385,7 +1385,10 @@ def run(args: argparse.Namespace) -> None:
             raise ValueError("Connected policy requires adv_ind. Re-run with --adv-ind positive.")
 
         print("[3/3] start episodes", flush=True)
-        for episode_idx in range(1, args.num_episode + 1):
+        attempt_idx = 0
+        while rollout_stats.total_saved < args.num_episode:
+            attempt_idx += 1
+            episode_idx = rollout_stats.total_saved + 1
             if not args.no_reset_before_episode:
                 print("[reset] moving to reset joint position", flush=True)
                 reset_runtime(runtime, args)
@@ -1549,6 +1552,13 @@ def run(args: argparse.Namespace) -> None:
                 flush=True,
             )
             if not save_or_discard(collector, outcome, args, rollout_stats):
+                break
+            if attempt_idx >= args.num_episode * 3 and rollout_stats.total_saved < args.num_episode:
+                print(
+                    f"[warn] reached {attempt_idx} attempts while target is {args.num_episode} saved episodes; "
+                    "stop to avoid an accidental endless collection loop.",
+                    flush=True,
+                )
                 break
 
         print(rollout_stats.format_line(prefix="[done summary]"), flush=True)
