@@ -118,6 +118,8 @@ class RolloutStats:
     success: int = 0
     failure: int = 0
     discarded: int = 0
+    dagger: int = 0
+    intervention_frames: int = 0
 
     @property
     def total_saved(self) -> int:
@@ -129,11 +131,20 @@ class RolloutStats:
             return 0.0
         return 100.0 * float(self.success) / float(self.total_saved)
 
-    def add_saved(self, *, success: bool) -> None:
+    @property
+    def dagger_rate(self) -> float:
+        if self.total_saved == 0:
+            return 0.0
+        return 100.0 * float(self.dagger) / float(self.total_saved)
+
+    def add_saved(self, *, success: bool, intervention_frames: int = 0) -> None:
         if success:
             self.success += 1
         else:
             self.failure += 1
+        if intervention_frames > 0:
+            self.dagger += 1
+            self.intervention_frames += int(intervention_frames)
 
     def add_discarded(self) -> None:
         self.discarded += 1
@@ -142,7 +153,9 @@ class RolloutStats:
         return (
             f"{prefix} saved_total={self.total_saved} "
             f"success={self.success} failure={self.failure} "
-            f"success_rate={self.success_rate:.1f}% discarded={self.discarded}"
+            f"success_rate={self.success_rate:.1f}% "
+            f"dagger={self.dagger} dagger_rate={self.dagger_rate:.1f}% "
+            f"intervention_frames={self.intervention_frames} discarded={self.discarded}"
         )
 
 
@@ -602,15 +615,16 @@ def load_existing_rollout_stats(dataset_dir: Path) -> RolloutStats:
 
     for parquet_path in sorted(data_dir.glob("chunk-*/episode_*.parquet")):
         try:
-            table = pq.read_table(parquet_path, columns=["reward"])
+            table = pq.read_table(parquet_path, columns=["reward", "intervention"])
             if table.num_rows == 0:
                 continue
             final_reward = float(_to_scalar(table["reward"].to_pylist()[-1]))
+            intervention_frames = int(sum(int(_to_scalar(value)) for value in table["intervention"].to_pylist()))
         except Exception as exc:
             print(f"[warn] skip existing episode count for {parquet_path}: {exc}", flush=True)
             continue
 
-        stats.add_saved(success=final_reward > 0.5)
+        stats.add_saved(success=final_reward > 0.5, intervention_frames=intervention_frames)
 
     return stats
 
@@ -972,10 +986,10 @@ def save_or_discard(
     )
     print(
         f"[episode] saved {frame_count} frames, success={success}, "
-        f"intervention={intervention_count}, adv_ind={args.save_adv_ind}",
+        f"dagger={intervention_count > 0}, intervention={intervention_count}, adv_ind={args.save_adv_ind}",
         flush=True,
     )
-    stats.add_saved(success=success)
+    stats.add_saved(success=success, intervention_frames=intervention_count)
     print(stats.format_line(), flush=True)
     return True
 
