@@ -74,10 +74,10 @@ PYTHONPATH=src venv/bin/python scripts/sample_lerobot_episode_subset.py \
 如果是在内网 openpi docker：
 
 ```bash
-docker exec -it openpi_test bash
+docker exec -it openpi_test /bin/bash
 cd /app
 
-export HF_LEROBOT_HOME=/home/user/.cache/huggingface/lerobot
+export HF_LEROBOT_HOME=/workspaces/lerobot
 export HF_HUB_OFFLINE=1
 export HF_DATASETS_OFFLINE=1
 export TRANSFORMERS_OFFLINE=1
@@ -426,7 +426,7 @@ tar -I 'zstd -T0 -d' \
 如果已有 `pistar_train` 容器：
 
 ```bash
-docker exec -it pistar_train bash
+docker exec -it pistar_train /bin/bash
 cd /home/user/code/pistar
 ```
 
@@ -446,8 +446,8 @@ docker run -t -d \
   -e TRANSFORMERS_OFFLINE=1 \
   -v /root/data_local/:/workspaces \
   -v /root/data_local/lerobot:/home/user/.cache/huggingface/lerobot \
-  -v /root/data_local/pistar_runs:/workspaces/pistar_runs \
-  -v /root/data_local/pistar_assets:/workspaces/pistar_assets \
+  -v /root/data_local/pistar_runs:/workspace/pistar/checkpoints \
+  -v /root/data_local/pistar_assets:/workspace/pistar/assets \
   -v /root/data_local/pi05_base/pi05base:/mnt/pi05_base \
   pistar-train-venv:38f7f38 \
   /bin/bash
@@ -458,7 +458,7 @@ docker run -t -d \
 ```bash
 cd /home/user/code/pistar
 
-export HF_LEROBOT_HOME=/home/user/.cache/huggingface/lerobot
+export HF_LEROBOT_HOME=/workspaces/lerobot
 export HF_HUB_OFFLINE=1
 export HF_DATASETS_OFFLINE=1
 export TRANSFORMERS_OFFLINE=1
@@ -470,30 +470,32 @@ export JAX_COMPILATION_CACHE_DIR=/tmp/jax_cache
 算 norm：
 
 ```bash
+CUDA_VISIBLE_DEVICES=0 \
 PYTHONPATH=src python scripts/compute_norm_stats.py \
   --config-name pi05_star_assemble_blocks_h50_from_pi05 \
   --repo-id piper/assemble_block1_demo250_dagger_r0_adv_value_accum4_r0 \
-  --local-data-dir /home/user/.cache/huggingface/lerobot/piper/assemble_block1_demo250_dagger_r0_adv_value_accum4_r0
+  --local-data-dir /workspaces/lerobot/piper/assemble_block1_demo250_dagger_r0_adv_value_accum4_r0
 ```
 
 复制 norm 到统一 assets 目录：
 
 ```bash
-mkdir -p /workspaces/pistar_assets/pi05_star_assemble_blocks_h50_from_pi05/piper
+mkdir -p /workspace/pistar/assets/pi05_star_assemble_blocks_h50_from_pi05/piper
 
 cp -a \
   assets/pi05_star_assemble_blocks_h50_from_pi05/piper/assemble_block1_demo250_dagger_r0_adv_value_accum4_r0 \
-  /workspaces/pistar_assets/pi05_star_assemble_blocks_h50_from_pi05/piper/
+  /workspace/pistar/assets/pi05_star_assemble_blocks_h50_from_pi05/piper/
 ```
 
 从 pi0.5 base 训练 PiStar：
 
 ```bash
+CUDA_VISIBLE_DEVICES=0,1,2,3,4,5 \
 PYTHONPATH=src python scripts/train.py pi05_star_assemble_blocks_h50_from_pi05 \
   --exp-name assemble_block1_pistar_dagger250_adv_pi05base_h20_6gpu_b192_r1 \
   --data.repo-id piper/assemble_block1_demo250_dagger_r0_adv_value_accum4_r0 \
-  --assets-base-dir /workspaces/pistar_assets \
-  --checkpoint-base-dir /workspaces/pistar_runs \
+  --assets-base-dir /workspace/pistar/assets \
+  --checkpoint-base-dir /workspace/pistar/checkpoints \
   --weight-loader.params-path /mnt/pi05_base/params \
   --batch-size 192 \
   --fsdp-devices 6 \
@@ -513,9 +515,9 @@ PYTHONPATH=src python scripts/train.py pi05_star_assemble_blocks_h50_from_pi05 \
 输出 checkpoint：
 
 ```bash
-/workspaces/pistar_runs/pi05_star_assemble_blocks_h50_from_pi05/assemble_block1_pistar_dagger250_adv_pi05base_h20_6gpu_b192_r1/5000
-/workspaces/pistar_runs/pi05_star_assemble_blocks_h50_from_pi05/assemble_block1_pistar_dagger250_adv_pi05base_h20_6gpu_b192_r1/10000
-/workspaces/pistar_runs/pi05_star_assemble_blocks_h50_from_pi05/assemble_block1_pistar_dagger250_adv_pi05base_h20_6gpu_b192_r1/15000
+/workspace/pistar/checkpoints/pi05_star_assemble_blocks_h50_from_pi05/assemble_block1_pistar_dagger250_adv_pi05base_h20_6gpu_b192_r1/5000
+/workspace/pistar/checkpoints/pi05_star_assemble_blocks_h50_from_pi05/assemble_block1_pistar_dagger250_adv_pi05base_h20_6gpu_b192_r1/10000
+/workspace/pistar/checkpoints/pi05_star_assemble_blocks_h50_from_pi05/assemble_block1_pistar_dagger250_adv_pi05base_h20_6gpu_b192_r1/15000
 ```
 
 ---
