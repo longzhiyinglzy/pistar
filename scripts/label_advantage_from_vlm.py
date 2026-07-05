@@ -98,10 +98,6 @@ import openpi.transforms as _transforms
 
 
 os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
-os.environ.setdefault("JAX_PLATFORMS", "cuda,cpu")
-
-# Force single GPU usage for inference
-os.environ.setdefault("JAX_PLATFORMS", "cuda")
 
 LOG = logging.getLogger("openpi")
 
