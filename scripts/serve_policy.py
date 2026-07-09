@@ -5,6 +5,7 @@ import socket
 
 import tyro
 
+from openpi.models import pi0_config
 from openpi.policies import policy as _policy
 from openpi.policies import policy_config as _policy_config
 from openpi.serving import websocket_policy_server
@@ -28,6 +29,8 @@ class Checkpoint:
     config: str
     # Checkpoint directory (e.g., "checkpoints/pi0_aloha_sim/exp/10000").
     dir: str
+    # Optionally override PiStar advantage guidance without editing the training config.
+    adv_guidance_beta: float | None = None
 
 
 @dataclasses.dataclass
@@ -89,8 +92,24 @@ def create_policy(args: Args) -> _policy.Policy:
     """Create a policy from the given arguments."""
     match args.policy:
         case Checkpoint():
+            train_config = _config.get_config(args.policy.config)
+            if args.policy.adv_guidance_beta is not None:
+                if not isinstance(train_config.model, pi0_config.Pi0Config) or not train_config.model.pistar:
+                    raise ValueError("--policy.adv-guidance-beta requires a PiStar Pi0Config.")
+                train_config = dataclasses.replace(
+                    train_config,
+                    model=dataclasses.replace(
+                        train_config.model,
+                        adv_guidance_beta=float(args.policy.adv_guidance_beta),
+                    ),
+                )
+            logging.info(
+                "Policy config=%s, adv_guidance_beta=%s",
+                args.policy.config,
+                getattr(train_config.model, "adv_guidance_beta", "n/a"),
+            )
             return _policy_config.create_trained_policy(
-                _config.get_config(args.policy.config), args.policy.dir, default_prompt=args.default_prompt
+                train_config, args.policy.dir, default_prompt=args.default_prompt
             )
         case Default():
             return create_default_policy(args.env, default_prompt=args.default_prompt)
