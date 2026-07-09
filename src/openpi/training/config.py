@@ -1513,8 +1513,8 @@ _CONFIGS = [
             pi05=True,
             pistar=True,
             action_horizon=50,
-            discrete_state_input=False,
-            adv_guidance_beta=2.0,
+            discrete_state_input=True,
+            adv_guidance_beta=1.0,
         ),
         data=LeRobotPiperDataConfig(
             repo_id="piper/assemble_block1_pistar_30hz_3view",
