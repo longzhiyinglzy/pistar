@@ -1513,7 +1513,7 @@ _CONFIGS = [
             pi05=True,
             pistar=True,
             action_horizon=50,
-            discrete_state_input=True,
+            discrete_state_input=False,
             adv_guidance_beta=1.0,
         ),
         data=LeRobotPiperDataConfig(
