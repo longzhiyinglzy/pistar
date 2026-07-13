@@ -1,14 +1,14 @@
-# PiStar0.6 Piper AssembleBlock1 Reproduction
+# PiStar0.6 Single-Arm Piper SpaceMouse Reproduction
 
-This fork is a real-robot reproduction of [ybpy/pistar](https://github.com/ybpy/pistar) on a single-arm Piper block assembly task. It includes the PiStar/OpenPI code plus the Piper/SpaceMouse collection and RTC evaluation helpers used in the experiment.
+This fork is a real-robot reproduction of [ybpy/pistar](https://github.com/ybpy/pistar) for a single-arm Piper setup driven by SpaceMouse demonstrations and SpaceMouse DAgger intervention. It includes the PiStar/OpenPI code plus the Piper collection, conversion, value-labeling, advantage-labeling, training, serving, and RTC evaluation helpers used in the experiment.
 
-Task prompt:
+Example task prompt used in the reported run:
 
 ```text
 Pick up the block1 and assemble it.
 ```
 
-The current best local run used:
+The current best local SpaceMouse pipeline run used:
 
 ```text
 base policy: pi0.5 base
