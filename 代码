@@ -1,37 +1,63 @@
-# PiStar0.6 / AssembleBlock1 当前保守版流程
+# PiStar0.6 AssembleBlock1 Final Workflow
 
-目标：
-- 原始 500 条成功 demo 只抽 250 条，先训练一个初始 pi0.5 policy。
-- 用这个初始 policy 做 DAgger rollout，采 250 条：200 成功、50 失败，其中允许 SpaceMouse 干预。
-- 用这 250 条 DAgger 数据训练 value function。
-- 用 value function 给同一批 DAgger 数据打 advantage。
-- 把原始 demo250 转成 PiStar flat，并全标为 positive。
-- 用 `demo250_positive + DAgger250_adv` 合并后的 500 条，在内网 H20 上从 pi0.5 base 训练 PiStar policy。
-- 回本地真机推理/rollout 测成功率。
+更新时间：2026-07-13
 
-重要路径：
+当前结论：
+
+- 最有效的一版 checkpoint：`/home/user/code/pistar/checkpoints/rollout2_850/10000`
+- 训练数据策略：`demo250_positive + success_dagger200_adv * 3`，总共 850 episodes
+- 初始化：`pi05_base`
+- 动作格式：delta joint action 训练，推理输出再转 absolute joint action
+- 推理默认：`adv_ind=positive`
+- 当前最好 beta：`1.2`，但建议再复测一组；保守部署可以用 `1.0`
+
+重要结果：
+
+```text
+beta=0.0  success=78%
+beta=0.5  success=78%
+beta=1.0  success=84%
+beta=1.1  success=82%
+beta=1.2  success=90%
+beta=1.3  success=76%
+beta=1.5  success=74%
+beta=2.0  success=74%
+```
+
+解释：
+
+- `beta=0` 是消融实验，相当于不用 positive guidance，只看 unconditional 分支。
+- `beta=1` 是正常使用 `Advantage: positive`。
+- `beta>1` 是放大 positive 方向；`1.2` 目前最好，`1.3+` 已经过强。
+- 最终建议：先复测 `beta=1.2`；如果仍然 >=86%，就固定 `1.2`，否则用 `1.0`。
+
+---
+
+## 0. 路径和相机
+
+本地路径：
 
 ```bash
-# 本地原始 500 条 demo
+# 原始 500 条成功 demo
 /home/user/.cache/huggingface/lerobot/piper/assemble_block1_v21
 
-# 本地抽出来的 250 条 demo，用来训练初始 pi0.5
+# 均匀抽样得到的 250 条 demo
 /home/user/.cache/huggingface/lerobot/piper/assemble_block1_v21_demo250_uniform
 
-# 本地 DAgger rollout 250 条，200 成功 / 50 失败
+# DAgger rollout 250 条：200 成功 / 50 失败
 /home/user/.cache/huggingface/lerobot/piper/assemble_block1_demo250_dagger_r0
 
-# 本地 value checkpoint
-/home/user/code/pistar/checkpoints/value/assemble_block1_dagger250_s200_f50_accum4_r0/step_00010000
-
-# 本地已经打好 advantage 的 DAgger 数据集，中间数据，不单独拿它训练 policy
+# DAgger 250 条，已经用 value model 打好 advantage
 /home/user/.cache/huggingface/lerobot/piper/assemble_block1_demo250_dagger_r0_adv_value_accum4_r0
 
-# 本地原始 demo250 转成 PiStar flat，全部 adv_ind=positive
+# demo250 转成 PiStar flat，并全部 adv_ind=positive
 /home/user/.cache/huggingface/lerobot/piper/assemble_block1_v21_demo250_uniform_pistar_30hz_3view_positive
 
-# 最终 policy 训练集：demo250_positive + DAgger250_adv，总共 500 条
-/home/user/.cache/huggingface/lerobot/piper/assemble_block1_demo250_plus_dagger250_adv_value_accum4_r0
+# policy 训练集：demo250 + success DAgger200 x3，总共 850 条
+/home/user/.cache/huggingface/lerobot/piper/assemble_block1_policy_demo250_success200_x3_r1
+
+# 当前最终 checkpoint
+/home/user/code/pistar/checkpoints/rollout2_850/10000
 ```
 
 相机：
@@ -42,7 +68,7 @@ side=349222061138
 wrist=409122272461
 ```
 
-任务语言：
+语言指令：
 
 ```bash
 Pick up the block1 and assemble it.
@@ -52,7 +78,7 @@ Pick up the block1 and assemble it.
 
 ## 1. 从 500 条 demo 抽 250 条
 
-在本地 pistar：
+本地执行：
 
 ```bash
 cd /home/user/code/pistar
@@ -68,73 +94,23 @@ PYTHONPATH=src venv/bin/python scripts/sample_lerobot_episode_subset.py \
 ```
 
 说明：
-- `stratified` 是按 episode 顺序分层抽样，不是只拿前 250 条。
-- `--video-mode copy` 是严格实验用，数据集独立，不依赖原始 500 条的软链接。
-- 如果只是本机快速试，也可以把 `copy` 换成 `symlink`，但传内网不建议。
+
+- `stratified` 是按 episode 顺序分层抽样，尽量保持原始 500 条的数据分布。
+- 严格实验用 `--video-mode copy`，不要软链接。
 
 ---
 
-## 2. 用 250 条 demo 训练初始 pi0.5 policy
+## 2. 用 demo250 训练初始 pi0.5 policy
 
-这一步在 openpi docker / openpi 代码里做，不在 pistar 里做。
+这一步在 openpi docker / openpi 代码里做。
 
-如果是在内网 openpi docker：
-
-```bash
-docker exec -it openpi_test /bin/bash
-cd /app
-
-export HF_LEROBOT_HOME=/workspaces/lerobot
-export HF_HUB_OFFLINE=1
-export HF_DATASETS_OFFLINE=1
-export TRANSFORMERS_OFFLINE=1
-export XLA_PYTHON_CLIENT_PREALLOCATE=false
-export HF_DATASETS_CACHE=/tmp/hf_datasets_cache_pi05_demo250
-export JAX_COMPILATION_CACHE_DIR=/tmp/jax_cache
-```
-
-先确认你的 openpi `config.py` 里训练配置的 `repo_id` 指向：
-
-```bash
-/home/user/.cache/huggingface/lerobot/piper/assemble_block1_v21_demo250_uniform
-```
-
-算 norm：
-
-```bash
-PYTHONPATH=src python scripts/compute_norm_stats.py \
-  --config-name pi05_Piper_AssembleBlock1 \
-  --repo-id /home/user/.cache/huggingface/lerobot/piper/assemble_block1_v21_demo250_uniform
-```
-
-训练初始 pi0.5：
-
-```bash
-PYTHONPATH=src python scripts/train.py pi05_Piper_AssembleBlock1 \
-  --exp-name pistar_AssembleBlock1_250 \
-  --data.repo-id /home/user/.cache/huggingface/lerobot/piper/assemble_block1_v21_demo250_uniform \
-  --weight-loader.params-path /root/data_local/pi05_base/pi05base/params \
-  --batch-size 192 \
-  --fsdp-devices 6 \
-  --num-workers 8 \
-  --num-train-steps 15000 \
-  --save-interval 1000 \
-  --keep-period 1000 \
-  --no-wandb-enabled \
-  --overwrite
-```
-
-已经可用的本地初始 policy checkpoint：
+初始 policy 训练好后，本地用过的 checkpoint 是：
 
 ```bash
 /home/user/code/pistar/checkpoints/pistar_AssembleBlock1_250/11000
 ```
 
----
-
-## 3. 本地启动初始 pi0.5 policy server
-
-如果 checkpoint 是 openpi 格式，用 openpi serve：
+本地启动初始 pi0.5 policy server：
 
 ```bash
 cd /home/user/code/openpi
@@ -147,23 +123,22 @@ uv run scripts/serve_policy.py policy:checkpoint \
   --port=8000
 ```
 
-注意：
-- 如果这个 config 仍然读 `/home/user/.cache/huggingface/lerobot/piper/assemble_block1_v21/norm_stats.json`，就要把 250 条 demo 的 norm 放到 config 对应路径，或者在 openpi config 里把 inference repo 改成 `assemble_block1_v21_demo250_uniform`。
-- policy server 开着不要关，下面 DAgger rollout 会连 `localhost:8000`。
-
 ---
 
-## 4. 用 SpaceMouse 做 DAgger rollout，采 250 条
+## 3. SpaceMouse DAgger Rollout
 
 目标：
-- 250 条总数
-- 200 成功
-- 50 失败
-- 干预后该 episode 后续一直标 intervention=1
-- `h` 可以 home，home 以后也算干预
-- 最长 1500 帧
 
-在本地 pistar：
+```text
+总数：250
+成功：200
+失败：50
+允许 SpaceMouse 干预
+只要干预过，当前 episode 后续都标 intervention=1
+最长帧数：1500
+```
+
+本地执行：
 
 ```bash
 cd /home/user/code/pistar
@@ -204,18 +179,18 @@ scripts/run_pi05_rtc_rollout_collect.sh \
   --rtc-debug false
 ```
 
-采集按键：
+按键：
 
 ```text
 Enter  开始
 s      成功保存
 f      失败保存
-r      丢弃当前 episode，不保存
-h      home，并从此 episode 后续都算干预
+r      丢弃当前 episode
+h      home，并从此 episode 后续标 intervention=1
 q/Esc  退出
 ```
 
-当前这次已经采完：
+已采集结果：
 
 ```text
 saved_total=250
@@ -229,9 +204,11 @@ discarded=37
 
 ---
 
-## 5. 本地训练 value function
+## 4. 训练 Value Function
 
-这一步用本地 4090 训练即可，冻结 SigLIP + Gemma，只训练 value head。
+value 数据使用 DAgger 250 条，也就是成功 200 + 失败 50。
+
+本地 4090 训练：
 
 ```bash
 cd /home/user/code/pistar
@@ -257,17 +234,13 @@ PYTHONPATH=src venv/bin/python scripts/train_value.py \
   --load_pretrained
 ```
 
-当前可用 checkpoint：
+当前 value checkpoint：
 
 ```bash
 /home/user/code/pistar/checkpoints/value/assemble_block1_dagger250_s200_f50_accum4_r0/step_00010000
 ```
 
----
-
-## 6. 快速评估 value function
-
-先只看每个 episode 终点：
+终点快速评估：
 
 ```bash
 cd /home/user/code/pistar
@@ -286,7 +259,7 @@ PYTHONPATH=src venv/bin/python scripts/export_vlm_values.py \
   --terminal_only
 ```
 
-这次结果：
+这版 value function：
 
 ```text
 success terminal mean ~= -0.415
@@ -294,60 +267,11 @@ failure terminal mean ~= -0.586
 AUC ~= 0.799
 ```
 
-可视化两个普通样本：
-
-```bash
-PYTHONPATH=src venv/bin/python scripts/export_vlm_values.py \
-  --data_dir /home/user/.cache/huggingface/lerobot/piper/assemble_block1_demo250_dagger_r0 \
-  --checkpoint_dir /home/user/code/pistar/checkpoints/value/assemble_block1_dagger250_s200_f50_accum4_r0 \
-  --checkpoint_name step_00010000 \
-  --output_path outputs/assemble_block1_dagger250_value_step10000_ep186_217.parquet \
-  --tokenizer_path /home/user/hf_models/ybpy/vlm_ckpt/tokenizer.model \
-  --batch_size 4 \
-  --num_workers 0 \
-  --episode_ids 186 217
-
-MPLCONFIGDIR=/tmp/matplotlib-pistar PYTHONPATH=src venv/bin/python scripts/render_episode_value_video.py \
-  --values_path outputs/assemble_block1_dagger250_value_step10000_ep186_217.parquet \
-  --output_dir outputs/value_videos_dagger250_step10000 \
-  --camera_column side_image \
-  --stride 2
-```
-
-可视化两个极端样本：
-
-```bash
-PYTHONPATH=src venv/bin/python scripts/export_vlm_values.py \
-  --data_dir /home/user/.cache/huggingface/lerobot/piper/assemble_block1_demo250_dagger_r0 \
-  --checkpoint_dir /home/user/code/pistar/checkpoints/value/assemble_block1_dagger250_s200_f50_accum4_r0 \
-  --checkpoint_name step_00010000 \
-  --output_path outputs/assemble_block1_dagger250_value_step10000_ep185_204.parquet \
-  --tokenizer_path /home/user/hf_models/ybpy/vlm_ckpt/tokenizer.model \
-  --batch_size 4 \
-  --num_workers 0 \
-  --episode_ids 185 204
-
-MPLCONFIGDIR=/tmp/matplotlib-pistar PYTHONPATH=src venv/bin/python scripts/render_episode_value_video.py \
-  --values_path outputs/assemble_block1_dagger250_value_step10000_ep185_204.parquet \
-  --output_dir outputs/value_videos_dagger250_step10000 \
-  --camera_column side_image \
-  --stride 2
-```
-
-视频输出：
-
-```text
-outputs/value_videos_dagger250_step10000/episode_000185_success_side_image_value.mp4
-outputs/value_videos_dagger250_step10000/episode_000186_success_side_image_value.mp4
-outputs/value_videos_dagger250_step10000/episode_000204_failure_side_image_value.mp4
-outputs/value_videos_dagger250_step10000/episode_000217_failure_side_image_value.mp4
-```
-
 ---
 
-## 7. 用 value function 给 DAgger 数据打 advantage
+## 5. 给 DAgger 数据打 Advantage
 
-先复制一份，不要改原始 DAgger 数据：
+先复制原 DAgger 数据，不改原始数据：
 
 ```bash
 cd /home/user/code/pistar
@@ -358,7 +282,7 @@ ADV=/home/user/.cache/huggingface/lerobot/piper/assemble_block1_demo250_dagger_r
 test ! -e "$ADV" && cp -a "$SRC" "$ADV"
 ```
 
-打 advantage：
+打 label：
 
 ```bash
 HF_DATASETS_CACHE=/tmp/hf_datasets_cache_dagger250_value \
@@ -377,7 +301,7 @@ PYTHONPATH=src venv/bin/python scripts/label_advantage_from_vlm.py \
   --right_wrist_image_col side_image
 ```
 
-这次实际写入结果：
+实际结果：
 
 ```text
 episodes=250
@@ -388,18 +312,24 @@ intervention_frames=18733
 positive_intervention=18733
 ```
 
-含义：
-- 所有 SpaceMouse 干预帧直接标 `positive`。
+规则：
+
+- SpaceMouse 干预帧强制 `positive`。
 - 非干预帧按 VLM value advantage 取 top 30% 为 `positive`。
 - 剩下为 `negative`。
 
 ---
 
-## 8. 生成最终 policy 训练集
+## 6. 生成 850 条 Policy 训练集
 
-不要只拿 DAgger 250 条训练 PiStar policy。value function 可以只用 DAgger 250 条，因为它需要成功/失败对比；但 policy 应该保留原始成功 demo 分布。
+最终策略：
 
-先把原始 demo250 转成 PiStar flat，并把这些 demo 全部标为 `positive`：
+```text
+policy 数据 = demo250_positive + success_dagger200_adv * 3
+总 episode 数 = 250 + 200 * 3 = 850
+```
+
+先把 demo250 转为 PiStar flat，全标 positive：
 
 ```bash
 cd /home/user/code/pistar
@@ -413,195 +343,286 @@ PYTHONPATH=src venv/bin/python scripts/convert_lerobot_v21_to_pistar_flat.py \
   --overwrite
 ```
 
-再把 demo250_positive 和 DAgger250_adv 合成最终 policy 训练集：
+从 DAgger adv 数据里筛出成功 200 条：
 
 ```bash
 cd /home/user/code/pistar
 
-POLICY_DATA=/home/user/.cache/huggingface/lerobot/piper/assemble_block1_demo250_plus_dagger250_adv_value_accum4_r0
+PYTHONPATH=src venv/bin/python scripts/filter_success_episodes.py \
+  --input-root /home/user/.cache/huggingface/lerobot/piper/assemble_block1_demo250_dagger_r0_adv_value_accum4_r0 \
+  --output-root /home/user/.cache/huggingface/lerobot/piper/assemble_block1_dagger_success200_adv_r1 \
+  --criterion reward \
+  --num-workers 8 \
+  --overwrite
+```
+
+合并，成功 DAgger 重复 3 次：
+
+```bash
+cd /home/user/code/pistar
 
 PYTHONPATH=src venv/bin/python scripts/merge_datasets.py \
   --sources \
     /home/user/.cache/huggingface/lerobot/piper/assemble_block1_v21_demo250_uniform_pistar_30hz_3view_positive \
-    /home/user/.cache/huggingface/lerobot/piper/assemble_block1_demo250_dagger_r0_adv_value_accum4_r0 \
-  --output "$POLICY_DATA" \
+    /home/user/.cache/huggingface/lerobot/piper/assemble_block1_dagger_success200_adv_r1 \
+    /home/user/.cache/huggingface/lerobot/piper/assemble_block1_dagger_success200_adv_r1 \
+    /home/user/.cache/huggingface/lerobot/piper/assemble_block1_dagger_success200_adv_r1 \
+  --output /home/user/.cache/huggingface/lerobot/piper/assemble_block1_policy_demo250_success200_x3_r1 \
   --fps 30 \
-  --num-workers 0 \
+  --num-workers 8 \
   --overwrite
 
-wc -l "$POLICY_DATA/meta/episodes.jsonl"
+wc -l /home/user/.cache/huggingface/lerobot/piper/assemble_block1_policy_demo250_success200_x3_r1/meta/episodes.jsonl
 ```
 
-这里期望输出是 500 条 episode：
+期望：
 
 ```text
-250 条原始成功 demo，adv_ind=positive
-250 条 DAgger rollout，adv_ind 来自 value function，其中干预帧强制 positive
-```
-
-如果你想做更保守的 450 条版本，可以后面再单独试 `demo250 + DAgger 成功200`。当前推荐先用 500 条，因为失败/低优势数据在 PiStar 里不是给 `positive` 推理模仿，而是作为 `negative` 条件提供对比。
-
----
-
-## 9. 打包最终 policy 数据集到内网
-
-本地打包：
-
-```bash
-mkdir -p /home/user/pistar_transfer
-
-tar -I 'zstd -T0 -3' \
-  -cf /home/user/pistar_transfer/assemble_block1_demo250_plus_dagger250_adv_value_accum4_r0.tar.zst \
-  -C /home/user/.cache/huggingface/lerobot/piper \
-  assemble_block1_demo250_plus_dagger250_adv_value_accum4_r0
-```
-
-内网解压：
-
-```bash
-mkdir -p /root/data_local/lerobot/piper
-
-zstd -t /root/docker/assemble_block1_demo250_plus_dagger250_adv_value_accum4_r0.tar.zst
-
-tar -I 'zstd -T0 -d' \
-  -xf /root/docker/assemble_block1_demo250_plus_dagger250_adv_value_accum4_r0.tar.zst \
-  -C /root/data_local/lerobot/piper
-```
-
-容器里应该能看到：
-
-```bash
-/workspaces/lerobot/piper/assemble_block1_demo250_plus_dagger250_adv_value_accum4_r0
+850
 ```
 
 ---
 
-## 10. 内网 H20 训练 PiStar policy
+## 7. 内网 Docker / 离线环境
 
-如果已有 `pistar_train` 容器：
+容器里数据建议放到 `/data`，它实际映射到大盘：
+
+```bash
+df -h /data
+```
+
+如果已有 `pistar_train`：
 
 ```bash
 docker exec -it pistar_train /bin/bash
 cd /home/user/code/pistar
 ```
 
-如果要重新开容器，用 6 张 H20：
-
-```bash
-docker run -t -d \
-  --shm-size 256G \
-  --restart=always \
-  --runtime=nvidia \
-  --name=pistar_train \
-  -e NVIDIA_VISIBLE_DEVICES=0,1,2,3,4,5 \
-  -e NVIDIA_DRIVER_CAPABILITIES=compute,utility \
-  -e XLA_PYTHON_CLIENT_PREALLOCATE=false \
-  -e HF_HUB_OFFLINE=1 \
-  -e HF_DATASETS_OFFLINE=1 \
-  -e TRANSFORMERS_OFFLINE=1 \
-  -v /root/data_local/:/workspaces \
-  -v /root/data_local/lerobot:/home/user/.cache/huggingface/lerobot \
-  -v /root/data_local/pistar_runs:/workspace/pistar/checkpoints \
-  -v /root/data_local/pistar_assets:/workspace/pistar/assets \
-  -v /root/data_local/pi05_base/pi05base:/mnt/pi05_base \
-  pistar-train-venv:38f7f38 \
-  /bin/bash
-```
-
-环境变量：
+离线环境变量：
 
 ```bash
 cd /home/user/code/pistar
 
-export HF_LEROBOT_HOME=/workspaces/lerobot
 export HF_HUB_OFFLINE=1
 export HF_DATASETS_OFFLINE=1
 export TRANSFORMERS_OFFLINE=1
+export WANDB_MODE=disabled
+export HF_LEROBOT_HOME=/home/user/.cache/huggingface/lerobot
+export OPENPI_DATA_HOME=/root/.cache/openpi
+export HF_DATASETS_CACHE=/data/cache/hf_datasets_success200_x3
+export JAX_COMPILATION_CACHE_DIR=/data/cache/jax
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
-export HF_DATASETS_CACHE=/tmp/hf_datasets_cache_dagger250_adv
-export JAX_COMPILATION_CACHE_DIR=/tmp/jax_cache
+export JAX_PLATFORMS=cuda,cpu
+
+mkdir -p "$HF_DATASETS_CACHE" "$JAX_COMPILATION_CACHE_DIR"
 ```
 
-算 norm：
+本地 LeRobot 路径注册：
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 \
-PYTHONPATH=src python scripts/compute_norm_stats.py \
+mkdir -p /home/user/.cache/huggingface/lerobot/piper
+
+ln -sfn \
+  /data/lerobot/piper/assemble_block1_policy_demo250_success200_x3_r1 \
+  /home/user/.cache/huggingface/lerobot/piper/assemble_block1_policy_demo250_success200_x3_r1
+```
+
+确认 tokenizer：
+
+```bash
+find /root/.cache/openpi /home/user/.cache/openpi /workspaces /data \
+  -type f -name paligemma_tokenizer.model 2>/dev/null
+```
+
+不要用 VLM 的 Gemma tokenizer 替代 `paligemma_tokenizer.model`。
+
+---
+
+## 8. 确认 Delta Action 配置
+
+训练和推理必须看到：
+
+```text
+inputs:
+  PiperInputs()
+  DeltaActions(mask=(True, True, True, True, True, True, False))
+outputs:
+  AbsoluteActions(mask=(True, True, True, True, True, True, False))
+  PiperOutputs()
+```
+
+检查命令：
+
+```bash
+cd /home/user/code/pistar
+
+PYTHONPATH=src venv/bin/python - <<'PY'
+from openpi.training.config import get_config
+
+c = get_config("pi05_star_assemble_blocks_h50_from_pi05")
+print("train transforms:")
+for x in c.data.create(c.assets_dirs, c.model).data_transforms.inputs:
+    print(" ", x)
+for x in c.data.create(c.assets_dirs, c.model).data_transforms.outputs:
+    print(" ", x)
+
+c = get_config("pi05_star_assemble_blocks_h50_from_pi05_infer")
+print("infer transforms:")
+for x in c.data.create(c.assets_dirs, c.model).data_transforms.inputs:
+    print(" ", x)
+for x in c.data.create(c.assets_dirs, c.model).data_transforms.outputs:
+    print(" ", x)
+print("beta:", c.model.adv_guidance_beta)
+print("discrete_state_input:", c.model.discrete_state_input)
+PY
+```
+
+当前保持：
+
+```text
+discrete_state_input=False
+extra_delta_transform=True
+```
+
+---
+
+## 9. 计算 Norm
+
+内网 Docker：
+
+```bash
+cd /home/user/code/pistar
+
+PYTHONPATH=src venv/bin/python scripts/compute_norm_stats.py \
   --config-name pi05_star_assemble_blocks_h50_from_pi05 \
-  --repo-id piper/assemble_block1_demo250_plus_dagger250_adv_value_accum4_r0 \
-  --local-data-dir /workspaces/lerobot/piper/assemble_block1_demo250_plus_dagger250_adv_value_accum4_r0
+  --repo-id piper/assemble_block1_policy_demo250_success200_x3_r1 \
+  --local-data-dir /data/lerobot/piper/assemble_block1_policy_demo250_success200_x3_r1
 ```
 
-如果 `/workspace/pistar` 路径不可写，就不用复制 norm，直接用 repo-local assets：
+训练时如果使用：
 
 ```bash
-ls -lh /home/user/code/pistar/assets/pi05_star_assemble_blocks_h50_from_pi05/piper/assemble_block1_demo250_plus_dagger250_adv_value_accum4_r0/norm_stats.json
+--assets-base-dir /data/pistar_assets
 ```
 
-从 pi0.5 base 训练 PiStar：
+则 norm 应该在：
 
 ```bash
+/data/pistar_assets/pi05_star_assemble_blocks_h50_from_pi05/piper/assemble_block1_policy_demo250_success200_x3_r1/norm_stats.json
+```
+
+如果脚本默认写到了 repo 目录，就复制过去：
+
+```bash
+mkdir -p /data/pistar_assets/pi05_star_assemble_blocks_h50_from_pi05/piper/assemble_block1_policy_demo250_success200_x3_r1
+
+cp \
+  /home/user/code/pistar/assets/pi05_star_assemble_blocks_h50_from_pi05/piper/assemble_block1_policy_demo250_success200_x3_r1/norm_stats.json \
+  /data/pistar_assets/pi05_star_assemble_blocks_h50_from_pi05/piper/assemble_block1_policy_demo250_success200_x3_r1/norm_stats.json
+```
+
+---
+
+## 10. 内网训练 PiStar Policy
+
+6 张 H20，batch size 192，总 batch，不是单卡 batch。
+
+```bash
+cd /home/user/code/pistar
+
+export HF_HUB_OFFLINE=1
+export HF_DATASETS_OFFLINE=1
+export TRANSFORMERS_OFFLINE=1
+export WANDB_MODE=disabled
+export HF_LEROBOT_HOME=/home/user/.cache/huggingface/lerobot
+export OPENPI_DATA_HOME=/root/.cache/openpi
+export HF_DATASETS_CACHE=/data/cache/hf_datasets_success200_x3
+export JAX_COMPILATION_CACHE_DIR=/data/cache/jax
+export XLA_PYTHON_CLIENT_PREALLOCATE=false
+export JAX_PLATFORMS=cuda,cpu
+
+mkdir -p "$HF_DATASETS_CACHE" "$JAX_COMPILATION_CACHE_DIR"
+
 CUDA_VISIBLE_DEVICES=0,1,2,3,4,5 \
-PYTHONPATH=src python scripts/train.py pi05_star_assemble_blocks_h50_from_pi05 \
-  --exp-name assemble_block1_pistar_demo250_dagger250_adv_pi05base_h20_6gpu_b192_r1 \
-  --data.repo-id piper/assemble_block1_demo250_plus_dagger250_adv_value_accum4_r0 \
-  --assets-base-dir /home/user/code/pistar/assets \
-  --checkpoint-base-dir /home/user/code/pistar/checkpoints \
+PYTHONPATH=src venv/bin/python scripts/train.py pi05_star_assemble_blocks_h50_from_pi05 \
+  --exp-name rollout2_850 \
+  --data.repo-id piper/assemble_block1_policy_demo250_success200_x3_r1 \
+  --assets-base-dir /data/pistar_assets \
+  --checkpoint-base-dir /data/pistar_runs \
   --weight-loader.params-path /mnt/pi05_base/params \
   --batch-size 192 \
   --fsdp-devices 6 \
   --num-workers 8 \
-  --num-train-steps 30000 \
-  --save-interval 5000 \
-  --keep-period 5000 \
+  --num-train-steps 10000 \
+  --save-interval 2500 \
+  --keep-period 2500 \
   --no-wandb-enabled \
   --overwrite
 ```
 
-注意：
-- `--batch-size 192` 是总 batch，6 卡时约每卡 32。
-- `--weight-loader.params-path /mnt/pi05_base/params` 是从 pi0.5 base 开始，不是从 40000 full-finetune 开始。
-- 先看 `5000 / 10000 / 15000`，不要只等 `30000`。
+说明：
 
-输出 checkpoint：
+- 从 `/mnt/pi05_base/params` 开始，也就是 pi0.5 base，不是之前 40000 full finetune。
+- 当前可用本地 checkpoint 已拷回：
 
 ```bash
-/home/user/code/pistar/checkpoints/pi05_star_assemble_blocks_h50_from_pi05/assemble_block1_pistar_demo250_dagger250_adv_pi05base_h20_6gpu_b192_r1/5000
-/home/user/code/pistar/checkpoints/pi05_star_assemble_blocks_h50_from_pi05/assemble_block1_pistar_demo250_dagger250_adv_pi05base_h20_6gpu_b192_r1/10000
-/home/user/code/pistar/checkpoints/pi05_star_assemble_blocks_h50_from_pi05/assemble_block1_pistar_demo250_dagger250_adv_pi05base_h20_6gpu_b192_r1/15000
+/home/user/code/pistar/checkpoints/rollout2_850/10000
 ```
 
 ---
 
-## 11. 拷回本地推理
+## 11. 本地推理 PiStar
 
-假设拷回本地路径：
+先确保本地 checkpoint 里有 norm。
+
+当前本地 checkpoint：
 
 ```bash
-/home/user/code/pistar/checkpoints/assemble_block1_pistar_demo250_dagger250_adv_pi05base_h20_6gpu_b192_r1/5000
+/home/user/code/pistar/checkpoints/rollout2_850/10000
 ```
 
-启动 PiStar policy server：
+当前本地已经放好两份 norm：
+
+```bash
+/home/user/code/pistar/checkpoints/rollout2_850/10000/assets/piper/assemble_block1_policy_demo250_success200_x3_r1/norm_stats.json
+/home/user/code/pistar/checkpoints/rollout2_850/10000/assets/piper/assemble_block1_pistar_30hz_3view/norm_stats.json
+```
+
+如果换机器，需要手动放：
+
+```bash
+cd /home/user/code/pistar
+
+mkdir -p checkpoints/rollout2_850/10000/assets/piper/assemble_block1_pistar_30hz_3view
+
+cp checkpoints/rollout2_850/norm_stats.json \
+  checkpoints/rollout2_850/10000/assets/piper/assemble_block1_pistar_30hz_3view/norm_stats.json
+```
+
+启动 server，推荐先用 `beta=1.2`：
 
 ```bash
 cd /home/user/code/pistar
 
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
 
-PYTHONPATH=src venv/bin/python scripts/serve_policy.py policy:checkpoint \
+PYTHONPATH=src venv/bin/python scripts/serve_policy.py \
+  --port 8000 \
+  policy:checkpoint \
   --policy.config=pi05_star_assemble_blocks_h50_from_pi05_infer \
-  --policy.dir=/home/user/code/pistar/checkpoints/assemble_block1_pistar_demo250_dagger250_adv_pi05base_h20_6gpu_b192_r1/5000 \
-  --port=8000
+  --policy.dir=/home/user/code/pistar/checkpoints/rollout2_850/10000 \
+  --policy.adv-guidance-beta 1.2
 ```
 
-注意：
-- 推理 config 是 `pi05_star_assemble_blocks_h50_from_pi05_infer`。
-- 这个 infer config 里 `adv_guidance_beta=2.0`，会启用 advantage guidance。
-- policy rollout 时要传 `--adv-ind positive`。
+如果要保守部署，改成：
+
+```bash
+--policy.adv-guidance-beta 1.0
+```
 
 ---
 
-## 12. 本地真机 rollout 评估 PiStar
+## 12. 本地成功率测试
 
 只评估，不保存数据：
 
@@ -624,9 +645,9 @@ scripts/run_pi05_rtc_success_eval.sh \
   --control-dt 0.033333 \
   --action-horizon 50 \
   --max-step 1500 \
-  --num-id 30 \
-  --num-position-ood 10 \
-  --num-angle-ood 10 \
+  --num-id 50 \
+  --num-position-ood 0 \
+  --num-angle-ood 0 \
   --post-reset-sleep 2.0 \
   --rtc-enabled true \
   --rtc-execution-horizon 10 \
@@ -639,7 +660,17 @@ scripts/run_pi05_rtc_success_eval.sh \
   --rtc-debug false
 ```
 
-如果要保存 rollout 数据，方便后续继续迭代：
+RTC 建议：
+
+- `beta=1.0` 通常 latency 约 85 ms，`--rtc-inference-delay-steps 4` 合适。
+- `beta>1.0` 可能需要算 unconditional 分支，latency 可能升高；如果稳定 140 ms，再试 `--rtc-inference-delay-steps 5`。
+- 但这次 `beta=1.2` 成功率最高，先用 delay 4 测，若动作抖再调 5。
+
+---
+
+## 13. 保存式 Rollout
+
+如果要保存 50 条评估数据：
 
 ```bash
 cd /home/user/code/pistar
@@ -648,7 +679,7 @@ scripts/run_pi05_rtc_rollout_collect.sh \
   --control-repo-path /home/user/code/control_your_robot \
   --server-host localhost \
   --server-port 8000 \
-  --repo-id assemble_block1_pistar_demo250_dagger250_adv_eval_5000 \
+  --repo-id assemble_block1_rollout2_850_beta12_eval50 \
   --output-dir /home/user/.cache/huggingface/lerobot/piper \
   --task-name "Pick up the block1 and assemble it." \
   --adv-ind positive \
@@ -680,16 +711,52 @@ scripts/run_pi05_rtc_rollout_collect.sh \
 
 ---
 
-## 13. 当前建议
+## 14. 磁盘清理建议
 
-优先顺序：
+低风险可删缓存：
 
-```text
-1. 内网训 5000 step
-2. 拷回本地测 20-50 次
-3. 如果比初始 pi0.5 差，先停，不要继续 30000
-4. 如果接近或更好，再测 10000 / 15000
-5. 最后再决定要不要继续收集第二轮 DAgger
+```bash
+rm -rf /home/user/.local/share/Trash/files/*
+rm -rf /home/user/.local/share/Trash/info/*
+rm -rf /home/user/.cache/huggingface/datasets
+rm -rf /home/user/.cache/pip
+rm -rf /home/user/.cache/vscode-cpptools/ipch
 ```
 
-这次最关键的判断不是训练 loss，而是真机 rollout 成功率。
+如果只推理、不再 resume，可以删旧 checkpoint 的 `train_state`：
+
+```bash
+rm -rf /home/user/code/pistar/checkpoints/rollout2/10000/train_state
+rm -rf /home/user/code/pistar/checkpoints/pistar_AssembleBlock1_250/11000/train_state
+```
+
+不要删：
+
+```bash
+/home/user/code/pistar/checkpoints/rollout2_850/10000/params
+/home/user/code/pistar/checkpoints/rollout2_850/10000/assets
+/home/user/code/pistar/checkpoints/rollout2_850/norm_stats.json
+```
+
+---
+
+## 15. GitHub 上传注意
+
+上传 GitHub 只提交代码和这个流程文件。
+
+不要提交：
+
+```text
+checkpoints/
+outputs/
+.idea/
+数据集
+大模型权重
+```
+
+当前关键代码改动：
+
+- `scripts/serve_policy.py` 支持 `--policy.adv-guidance-beta`
+- `config.py` 的 Piper PiStar 配置保持 `extra_delta_transform=True`
+- infer 保持 `discrete_state_input=False`
+
