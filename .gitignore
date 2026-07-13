@@ -8,6 +8,7 @@ dataset_meta_info/
 synthetic_traj/
 replay_outputs/
 init_gt_all/
+代码
 !gemma/
 !gemma/**
 !control_your_robot/
