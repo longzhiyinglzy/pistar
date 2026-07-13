@@ -27,11 +27,18 @@ This repository tracks code and reproducible workflow documentation. Do not comm
 
 The public workflow assumes these local paths are set by the user:
 
+The dataset names below are examples from the reported run. Rename them for your own task.
+
 ```bash
 export PISTAR_ROOT=/path/to/pistar
 export OPENPI_ROOT=/path/to/openpi
 export CONTROL_REPO=$PISTAR_ROOT/control_your_robot
-export LEROBOT_ROOT=/path/to/lerobot/piper
+export HF_LEROBOT_HOME=/path/to/lerobot
+export LEROBOT_ROOT=$HF_LEROBOT_HOME/piper
+export HDF5_ROOT=/path/to/piper_datasets
+export HDF5_TASK_NAME=your_raw_hdf5_task_name
+export RAW_HDF5_DIR=$HDF5_ROOT/$HDF5_TASK_NAME
+export DEMO_REPO_ID=piper/your_task_v21
 
 export DEMO_V21=$LEROBOT_ROOT/assemble_block1_v21
 export DEMO250=$LEROBOT_ROOT/assemble_block1_v21_demo250_uniform
@@ -63,40 +70,6 @@ deployment command: absolute target joint position after output transform
 ```
 
 `DeltaActions(mask=(True, True, True, True, True, True, False))` converts absolute targets into delta targets during training. `AbsoluteActions(...)` converts the predicted delta back to absolute target joints before the Piper deployment script sends the command to the controller. So the model learns relative joint deltas, while the provided Piper runtime still receives absolute target positions.
-
-Verify the active transforms with:
-
-```bash
-cd "$PISTAR_ROOT"
-
-PYTHONPATH=src venv/bin/python - <<'PY'
-from openpi.training.config import get_config
-
-for name in ["pi05_star_assemble_blocks_h50_from_pi05", "pi05_star_assemble_blocks_h50_from_pi05_infer"]:
-    c = get_config(name)
-    dc = c.data.create(c.assets_dirs, c.model)
-    print(name)
-    print("inputs:")
-    for x in dc.data_transforms.inputs:
-        print(" ", x)
-    print("outputs:")
-    for x in dc.data_transforms.outputs:
-        print(" ", x)
-    print("beta:", getattr(c.model, "adv_guidance_beta", None))
-    print("discrete_state_input:", c.model.discrete_state_input)
-PY
-```
-
-Expected summary:
-
-```text
-inputs:
-  PiperInputs()
-  DeltaActions(mask=(True, True, True, True, True, True, False))
-outputs:
-  AbsoluteActions(mask=(True, True, True, True, True, True, False))
-  PiperOutputs()
-```
 
 ## Dataset Fields
 
@@ -160,36 +133,63 @@ Set camera serials either through command-line arguments in the rollout/eval scr
 
 ## 2. Collect HDF5 / LeRobot v2.1 Demos With SpaceMouse
 
-The rest of the pipeline expects a successful LeRobot v2.1 demo dataset. You can collect LeRobot data directly or collect HDF5 first and convert it.
+The tested route is:
 
-Direct LeRobot collection example:
+```text
+SpaceMouse -> Piper HDF5 demos -> LeRobot v2.1
+```
+
+Collect HDF5 demonstrations with the high-frequency SpaceMouse controller:
 
 ```bash
-cd "$PISTAR_ROOT"
+conda activate pi0
+cd "$PISTAR_ROOT/control_your_robot"
 
-python control_your_robot/example/collect/collect_lerobot_spacemouse_piper_teleop.py \
-  --repo-id assemble_block1_v21 \
-  --output-dir "$LEROBOT_ROOT" \
-  --task-name "$TASK_NAME" \
-  --num-episode "$NUM_DEMOS" \
-  --fps 30 \
-  --control-hz 200 \
-  --arm-can can0 \
-  --max-step 1500 \
-  --enter-label success
+python example/collect/collect_piper.py \
+  --save-path "$HDF5_ROOT" \
+  --task-name "$HDF5_TASK_NAME" \
+  --num-episode "$NUM_DEMOS"
 ```
 
 Keyboard controls:
 
 ```text
-Enter  start or finish according to --enter-label
-s      save success
-f      save failure
-r      discard
-q/Esc  quit
+Enter  start episode, then save and stop current episode
+r      discard current episode and retry the same episode index
+h      home the arm and continue recording the same trajectory
 ```
 
-Use your own successful demo dataset for training. If you want to reproduce the reported conservative ablation, sample a uniform 250-episode subset from your demo dataset:
+This script uses a 200 Hz SpaceMouse control loop and a 30 Hz camera-aligned sampling loop. It is not the same as the direct LeRobot collector: it saves raw HDF5 first, including synchronized state/action buffers, then conversion produces the LeRobot v2.1 dataset.
+
+An alternate direct LeRobot collector is available at `control_your_robot/example/collect/collect_lerobot_spacemouse_piper_teleop.py`, but the HDF5 route above matches the tested Pi0.5/PiStar data pipeline.
+
+## 3. Convert HDF5 to LeRobot v2.1 if Needed
+
+Convert Piper HDF5 joint-pose demos to LeRobot v2.1:
+
+```bash
+conda activate pi0
+cd "$PISTAR_ROOT/control_your_robot"
+export HF_LEROBOT_HOME=/path/to/lerobot
+
+python scripts/convert2openpi_piper_jointpose.py \
+  --raw-dir "$RAW_HDF5_DIR" \
+  --repo-id "$DEMO_REPO_ID" \
+  --task "$TASK_NAME" \
+  --mode video
+```
+
+The converter expects three real camera streams in the HDF5 files:
+
+```text
+slave_cam_head/color  -> observation.images.cam_head
+slave_cam_side/color  -> observation.images.cam_side
+slave_cam_wrist/color -> observation.images.cam_wrist
+```
+
+The converted dataset contains 7-D `observation.state` and `action`: six Piper joints plus gripper. By default, `action` is the next observed joint state (`action_mode="next_state"`), which is the setting used for the reported Pi0.5/PiStar pipeline.
+
+Use your own successful demo dataset for training. If you want to reproduce the reported conservative ablation, sample a uniform 250-episode subset after conversion:
 
 ```bash
 cd "$PISTAR_ROOT"
@@ -205,26 +205,6 @@ PYTHONPATH=src venv/bin/python scripts/sample_lerobot_episode_subset.py \
 ```
 
 Use `--video-mode copy` for a standalone dataset. Training reads parquet/image features, but keeping videos is useful for inspection and strict dataset portability.
-
-## 3. Convert HDF5 to LeRobot v2.1 if Needed
-
-If your raw demonstrations were collected as HDF5 with `control_your_robot`, convert them before continuing:
-
-```bash
-cd "$PISTAR_ROOT/control_your_robot"
-
-python scripts/convert2lerobot.py \
-  /path/to/hdf5_demo_root \
-  piper/assemble_block1_v21
-```
-
-After conversion, inspect the dataset:
-
-```bash
-python scripts/inspect_parquet.py "$DEMO_V21"
-```
-
-The converted dataset should contain 7-D `state` and `actions` columns: six Piper joints plus gripper.
 
 ## 4. Train Initial Pi0.5 Policy
 
@@ -350,49 +330,7 @@ PYTHONPATH=src venv/bin/python scripts/train_value.py \
   --load_pretrained
 ```
 
-Quick terminal-only check:
-
-```bash
-cd "$PISTAR_ROOT"
-
-PYTHONPATH=src venv/bin/python scripts/export_vlm_values.py \
-  --data_dir "$DAGGER250" \
-  --checkpoint_dir "$PISTAR_ROOT/checkpoints/value/assemble_block1_dagger250_s200_f50_accum4_r0" \
-  --checkpoint_name step_00010000 \
-  --output_path outputs/assemble_block1_dagger250_value_step10000_terminal.parquet \
-  --tokenizer_path "$VLM_ROOT/tokenizer.model" \
-  --batch_size 4 \
-  --num_workers 0 \
-  --terminal_only
-```
-
-The reported value model separated terminal success/failure approximately as:
-
-```text
-success terminal mean ~= -0.415
-failure terminal mean ~= -0.586
-AUC ~= 0.799
-```
-
-You can also export a few full episodes and render side-view value curves:
-
-```bash
-PYTHONPATH=src venv/bin/python scripts/export_vlm_values.py \
-  --data_dir "$DAGGER250" \
-  --checkpoint_dir "$PISTAR_ROOT/checkpoints/value/assemble_block1_dagger250_s200_f50_accum4_r0" \
-  --checkpoint_name step_00010000 \
-  --output_path outputs/assemble_block1_dagger250_value_step10000_selected_episodes.parquet \
-  --tokenizer_path "$VLM_ROOT/tokenizer.model" \
-  --batch_size 4 \
-  --num_workers 0 \
-  --episode_ids 0 1
-
-PYTHONPATH=src venv/bin/python scripts/render_episode_value_video.py \
-  --values_path outputs/assemble_block1_dagger250_value_step10000_selected_episodes.parquet \
-  --output_dir outputs/value_videos \
-  --camera_column side_image \
-  --stride 2
-```
+Optional diagnostics are available in `scripts/export_vlm_values.py`, `scripts/plot_vlm_value_diagnostics.py`, and `scripts/render_episode_value_video.py`, but they are not required for the main training pipeline.
 
 ## 7. Label Advantage
 
