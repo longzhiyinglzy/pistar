@@ -48,6 +48,7 @@ export HEAD_SERIAL=<head_camera_serial>
 export SIDE_SERIAL=<side_camera_serial>
 export WRIST_SERIAL=<wrist_camera_serial>
 export TASK_NAME="Pick up the block1 and assemble it."
+export NUM_DEMOS=<number_of_successful_demo_episodes>
 ```
 
 ## Action Representation
@@ -170,7 +171,7 @@ python control_your_robot/example/collect/collect_lerobot_spacemouse_piper_teleo
   --repo-id assemble_block1_v21 \
   --output-dir "$LEROBOT_ROOT" \
   --task-name "$TASK_NAME" \
-  --num-episode 500 \
+  --num-episode "$NUM_DEMOS" \
   --fps 30 \
   --control-hz 200 \
   --arm-can can0 \
@@ -188,7 +189,7 @@ r      discard
 q/Esc  quit
 ```
 
-For the conservative PiStar0.6 experiment, collect 500 successful demos first, then sample 250 uniformly:
+Use your own successful demo dataset for training. If you want to reproduce the reported conservative ablation, sample a uniform 250-episode subset from your demo dataset:
 
 ```bash
 cd "$PISTAR_ROOT"
