@@ -247,7 +247,7 @@ class Pi0(_model.BaseModel):
         if noise is None:
             noise = jax.random.normal(rng, (batch_size, self.action_horizon, self.action_dim))
 
-        # first fill KV cache with a forward pass of the prefix
+        # First fill KV cache with a forward pass of the prefix.
         def encode_prefix(prefix_observation):
             prefix_tokens, prefix_mask, prefix_ar_mask = self.embed_prefix(prefix_observation)
             prefix_attn_mask = make_attn_mask(prefix_mask, prefix_ar_mask)

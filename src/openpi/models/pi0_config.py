@@ -30,7 +30,7 @@ class Pi0Config(_model.BaseModelConfig):
     # - the action expert uses adaRMSNorm to inject the flow matching timestep
     pi05: bool = False
     pistar: bool = False
-    # PiStar inference guidance scale. Keep 1.0 for training; set >1.0 in inference configs to enable CFG.
+    # PiStar inference guidance scale. Keep 1.0 for training; override at inference to enable CFG.
     adv_guidance_beta: float = 1.0
     # This config option is not used directly by the model, but it is read by the ModelTransformFactory.
     discrete_state_input: bool = None  # type: ignore

@@ -66,6 +66,8 @@ IMAGE_RESOLUTION = (224, 224)
 #     "state": float32[*b, s],  # Low-dimensional robot state
 #     "tokenized_prompt": int32[*b, l],  # Optional, tokenized language prompt
 #     "tokenized_prompt_mask": bool[*b, l],  # Optional, mask for tokenized prompt
+#     "tokenized_prompt_uncond": int32[*b, l],  # Optional, prompt with dropped advantage condition
+#     "tokenized_prompt_uncond_mask": bool[*b, l],  # Optional, mask for dropped-advantage prompt
 #     "token_ar_mask": int32[*b, l],  # Optional, autoregressive mask for FAST model
 #     "token_loss_mask": bool[*b, l],  # Optional, loss mask for FAST model
 #
@@ -98,9 +100,9 @@ class Observation(Generic[ArrayT]):
     tokenized_prompt: at.Int[ArrayT, "*b l"] | None = None
     # Tokenized prompt mask.
     tokenized_prompt_mask: at.Bool[ArrayT, "*b l"] | None = None
-    # Tokenized prompt with advantage conditioning removed for PiStar guidance.
+    # Tokenized prompt with advantage conditioning removed, used for PiStar guidance at inference time.
     tokenized_prompt_uncond: at.Int[ArrayT, "*b l"] | None = None
-    # Tokenized prompt mask for the dropped-advantage guidance prompt.
+    # Tokenized prompt mask for the unconditional PiStar guidance prompt.
     tokenized_prompt_uncond_mask: at.Bool[ArrayT, "*b l"] | None = None
 
     # pi0-fast model specific fields.
