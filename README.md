@@ -623,14 +623,58 @@ RTC notes:
 --rtc-measure-inference-delay false
   Use the fixed delay from --rtc-inference-delay-steps.
 
---rtc-inference-delay-steps 4
-  Good when latency is around 85-140 ms at 30 Hz.
-  Try 5 if latency is consistently near 140 ms and motion looks delayed.
-
 --policy.adv-guidance-beta
   beta=0.0 disables advantage guidance and is useful as an ablation.
   beta=1.0 is standard conditional guidance.
   beta>1.0 strengthens positive-advantage guidance, but can increase latency or overshoot.
+```
+
+RTC delay presets observed on an RTX 4090 policy server:
+
+```text
+beta=1.0
+  measured inference latency: about 85 ms
+  recommended --rtc-inference-delay-steps: 4
+
+beta!=1.0, for example beta=1.2
+  measured inference latency: about 140 ms
+  recommended --rtc-inference-delay-steps: 5
+```
+
+Example beta=1.0 serving:
+
+```bash
+PYTHONPATH=src venv/bin/python scripts/serve_policy.py \
+  --port 8000 \
+  policy:checkpoint \
+  --policy.config=pi05_star_assemble_blocks_h50_from_pi05_infer \
+  --policy.dir "$PISTAR_CKPT" \
+  --policy.adv-guidance-beta 1.0
+```
+
+In the full `scripts/run_pi05_rtc_success_eval.sh` command above, use:
+
+```text
+--rtc-measure-inference-delay false
+--rtc-inference-delay-steps 4
+```
+
+Example beta=1.2 serving:
+
+```bash
+PYTHONPATH=src venv/bin/python scripts/serve_policy.py \
+  --port 8000 \
+  policy:checkpoint \
+  --policy.config=pi05_star_assemble_blocks_h50_from_pi05_infer \
+  --policy.dir "$PISTAR_CKPT" \
+  --policy.adv-guidance-beta 1.2
+```
+
+In the full `scripts/run_pi05_rtc_success_eval.sh` command above, use:
+
+```text
+--rtc-measure-inference-delay false
+--rtc-inference-delay-steps 5
 ```
 
 Local beta sweep on the reported checkpoint:
