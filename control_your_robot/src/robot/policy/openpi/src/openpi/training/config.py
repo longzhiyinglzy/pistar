@@ -1318,8 +1318,8 @@ _CONFIGS = [
         num_train_steps=30_000,
         keep_period=1_000,
     ),
-    # Pi05_star Piper block assembly, initialized from the user's full-finetuned pi0.5 checkpoint.
-    # This keeps the successful 30 Hz / action_horizon=50 setup used by the evaluated pi0.5 policy.
+    # Pi05_star Piper block assembly, initialized from pi0.5 base via command-line weight-loader override.
+    # This keeps the 30 Hz / action_horizon=50 setup used by the evaluated Piper policies.
     TrainConfig(
         name="pi05_star_assemble_blocks_h50_from_pi05",
         project_name="pistar",
@@ -1340,9 +1340,7 @@ _CONFIGS = [
         ),
         optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
         ema_decay=0.999,
-        weight_loader=weight_loaders.CheckpointWeightLoader(
-            "/home/user/pi0.5/train/fullfinetune/pi05_Piper_AssembleBlock1/40000/params"
-        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("/path/to/pi05_base/params"),
         pytorch_weight_path="/path/to/your/pytorch_weight_path",
         num_train_steps=10_000,
         keep_period=1_000,
@@ -1369,9 +1367,7 @@ _CONFIGS = [
         ),
         optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
         ema_decay=0.999,
-        weight_loader=weight_loaders.CheckpointWeightLoader(
-            "/home/user/pi0.5/train/fullfinetune/pi05_Piper_AssembleBlock1/40000/params"
-        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("/path/to/pi05_base/params"),
         pytorch_weight_path="/path/to/your/pytorch_weight_path",
         num_train_steps=10_000,
         keep_period=1_000,

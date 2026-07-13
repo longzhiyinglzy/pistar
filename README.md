@@ -1,6 +1,6 @@
 # PiStar0.6 Piper AssembleBlock1 Reproduction
 
-This repository is an experimental real-robot reproduction of [ybpy/pistar](https://github.com/ybpy/pistar) for a Piper single-arm block assembly task with three RealSense views.
+This fork is a real-robot reproduction of [ybpy/pistar](https://github.com/ybpy/pistar) on a single-arm Piper block assembly task. It includes the PiStar/OpenPI code plus the Piper/SpaceMouse collection and RTC evaluation helpers used in the experiment.
 
 Task prompt:
 
@@ -8,109 +8,29 @@ Task prompt:
 Pick up the block1 and assemble it.
 ```
 
-High-level result from the current run:
+The current best local run used:
 
 ```text
 base policy: pi0.5 base
-policy data: demo250_positive + success_dagger200_adv * 3
+demo data: 250 successful LeRobot v2.1 demos
+DAgger data: 250 rollout episodes, 200 success + 50 failure
+policy data: demo250_positive + success_dagger200_adv repeated 3 times
 policy episodes: 850
-action horizon: 50
 control rate: 30 Hz
-best guidance beta observed: 1.2
+action horizon: 50
+best tested guidance beta: 1.2
 ```
 
-Beta sweep on the local robot:
+## Repository Notes
 
-```text
-beta=0.0  success=78%
-beta=0.5  success=78%
-beta=1.0  success=84%
-beta=1.1  success=82%
-beta=1.2  success=90%
-beta=1.3  success=76%
-beta=1.5  success=74%
-beta=2.0  success=74%
-```
+This repository tracks code and reproducible workflow documentation. Do not commit robot datasets, checkpoints, VLM weights, Pi0.5 weights, `outputs/`, `.idea/`, or private machine paths.
 
-Use `beta=1.2` only after re-testing it on your setup. A conservative default is `beta=1.0`.
-
-## Repository Policy
-
-This repository tracks code and reproducible workflow documentation only.
-
-Do not commit:
-
-```text
-checkpoints/
-outputs/
-.idea/
-LeRobot datasets
-Pi0.5 / PiStar checkpoints
-VLM / SigLIP / Gemma weights
-```
-
-## Action Representation
-
-This setup uses `extra_delta_transform=True` for the Piper PiStar config.
-
-The important detail is:
-
-```text
-dataset action columns: absolute target joint positions
-model training target: delta joint action for the first 6 joints
-gripper target: absolute
-policy server output in this repo: absolute target joint positions for the controller
-```
-
-In code, `DeltaActions(mask=(True, True, True, True, True, True, False))` converts absolute joint targets into delta targets for training. During inference, `AbsoluteActions(...)` adds the predicted delta back to the current state before sending actions to the Piper control script.
-
-So the model itself learns relative joint deltas, but the default deployment wrapper emits absolute target joint positions because the provided Piper controller scripts call `set_joint(...)` or `set_position(...)` with target positions. If your controller consumes delta commands directly, remove or replace the `AbsoluteActions` output transform and update the deployment script accordingly.
-
-You can verify the active transforms with:
-
-```bash
-cd "$PISTAR_ROOT"
-
-PYTHONPATH=src venv/bin/python - <<'PY'
-from openpi.training.config import get_config
-
-for name in [
-    "pi05_star_assemble_blocks_h50_from_pi05",
-    "pi05_star_assemble_blocks_h50_from_pi05_infer",
-]:
-    c = get_config(name)
-    dc = c.data.create(c.assets_dirs, c.model)
-    print(name)
-    print("inputs:")
-    for x in dc.data_transforms.inputs:
-        print(" ", x)
-    print("outputs:")
-    for x in dc.data_transforms.outputs:
-        print(" ", x)
-    print("beta:", getattr(c.model, "adv_guidance_beta", None))
-    print("discrete_state_input:", c.model.discrete_state_input)
-PY
-```
-
-Expected Piper PiStar transform summary:
-
-```text
-inputs:
-  PiperInputs()
-  DeltaActions(mask=(True, True, True, True, True, True, False))
-outputs:
-  AbsoluteActions(mask=(True, True, True, True, True, True, False))
-  PiperOutputs()
-```
-
-## Environment Variables
-
-Set these paths for your machine before running the commands below:
+The public workflow assumes these local paths are set by the user:
 
 ```bash
 export PISTAR_ROOT=/path/to/pistar
 export OPENPI_ROOT=/path/to/openpi
-export CONTROL_REPO=/path/to/control_your_robot
+export CONTROL_REPO=$PISTAR_ROOT/control_your_robot
 export LEROBOT_ROOT=/path/to/lerobot/piper
 
 export DEMO_V21=$LEROBOT_ROOT/assemble_block1_v21
@@ -130,17 +50,56 @@ export WRIST_SERIAL=<wrist_camera_serial>
 export TASK_NAME="Pick up the block1 and assemble it."
 ```
 
-For the experiment reported above, the three camera roles are:
+## Action Representation
+
+The Piper PiStar config uses `extra_delta_transform=True`.
 
 ```text
-head: front/global view
-side: side view
-wrist: wrist-mounted view
+dataset action columns: absolute target joint positions
+model training target: delta joint action for joints 1-6
+gripper target: absolute
+deployment command: absolute target joint position after output transform
+```
+
+`DeltaActions(mask=(True, True, True, True, True, True, False))` converts absolute targets into delta targets during training. `AbsoluteActions(...)` converts the predicted delta back to absolute target joints before the Piper deployment script sends the command to the controller. So the model learns relative joint deltas, while the provided Piper runtime still receives absolute target positions.
+
+Verify the active transforms with:
+
+```bash
+cd "$PISTAR_ROOT"
+
+PYTHONPATH=src venv/bin/python - <<'PY'
+from openpi.training.config import get_config
+
+for name in ["pi05_star_assemble_blocks_h50_from_pi05", "pi05_star_assemble_blocks_h50_from_pi05_infer"]:
+    c = get_config(name)
+    dc = c.data.create(c.assets_dirs, c.model)
+    print(name)
+    print("inputs:")
+    for x in dc.data_transforms.inputs:
+        print(" ", x)
+    print("outputs:")
+    for x in dc.data_transforms.outputs:
+        print(" ", x)
+    print("beta:", getattr(c.model, "adv_guidance_beta", None))
+    print("discrete_state_input:", c.model.discrete_state_input)
+PY
+```
+
+Expected summary:
+
+```text
+inputs:
+  PiperInputs()
+  DeltaActions(mask=(True, True, True, True, True, True, False))
+outputs:
+  AbsoluteActions(mask=(True, True, True, True, True, True, False))
+  PiperOutputs()
 ```
 
 ## Dataset Fields
 
-The PiStar flat LeRobot datasets used here contain:
+The PiStar flat LeRobot datasets use:
 
 ```text
 image
@@ -160,7 +119,7 @@ index
 task_index
 ```
 
-The Piper config maps them into model views as:
+The model view mapping is:
 
 ```text
 image       -> cam_high
@@ -168,9 +127,68 @@ wrist_image -> cam_wrist
 side_image  -> cam_wrist1
 ```
 
-## 1. Sample 250 Demo Episodes
+## 1. Hardware Setup
 
-Start from a successful 500-episode LeRobot v2.1 demo dataset and sample 250 episodes uniformly over episode order:
+Hardware used in the reported run:
+
+```text
+robot: Piper single arm
+arm name: left_arm
+CAN device: can0
+state source: joint
+cameras: RealSense head + side + wrist
+teleop: 3Dconnexion SpaceMouse
+policy control rate: 30 Hz
+SpaceMouse control rate during DAgger: 200 Hz
+action horizon: 50
+RTC execution horizon: 10
+```
+
+Install and verify robot-side dependencies before running collection:
+
+```bash
+python - <<'PY'
+import piper_sdk
+import pyrealsense2
+print("piper_sdk ok")
+print("pyrealsense2 ok")
+PY
+```
+
+Set camera serials either through command-line arguments in the rollout/eval scripts or in `control_your_robot/my_robot/camera_config.py`.
+
+## 2. Collect HDF5 / LeRobot v2.1 Demos With SpaceMouse
+
+The rest of the pipeline expects a successful LeRobot v2.1 demo dataset. You can collect LeRobot data directly or collect HDF5 first and convert it.
+
+Direct LeRobot collection example:
+
+```bash
+cd "$PISTAR_ROOT"
+
+python control_your_robot/example/collect/collect_lerobot_spacemouse_piper_teleop.py \
+  --repo-id assemble_block1_v21 \
+  --output-dir "$LEROBOT_ROOT" \
+  --task-name "$TASK_NAME" \
+  --num-episode 500 \
+  --fps 30 \
+  --control-hz 200 \
+  --arm-can can0 \
+  --max-step 1500 \
+  --enter-label success
+```
+
+Keyboard controls:
+
+```text
+Enter  start or finish according to --enter-label
+s      save success
+f      save failure
+r      discard
+q/Esc  quit
+```
+
+For the conservative PiStar0.6 experiment, collect 500 successful demos first, then sample 250 uniformly:
 
 ```bash
 cd "$PISTAR_ROOT"
@@ -185,13 +203,35 @@ PYTHONPATH=src venv/bin/python scripts/sample_lerobot_episode_subset.py \
   --overwrite
 ```
 
-Use `--video-mode copy` for a strict standalone dataset. Use symlinks only for quick local experiments.
+Use `--video-mode copy` for a standalone dataset. Training reads parquet/image features, but keeping videos is useful for inspection and strict dataset portability.
 
-## 2. Train the Initial Pi0.5 Policy
+## 3. Convert HDF5 to LeRobot v2.1 if Needed
 
-Train this in your OpenPI environment, not in the PiStar environment. The initial policy is trained from `pi05_base` using `DEMO250`.
+If your raw demonstrations were collected as HDF5 with `control_your_robot`, convert them before continuing:
 
-Example serve command after training:
+```bash
+cd "$PISTAR_ROOT/control_your_robot"
+
+python scripts/convert2lerobot.py \
+  /path/to/hdf5_demo_root \
+  piper/assemble_block1_v21
+```
+
+After conversion, inspect the dataset:
+
+```bash
+python scripts/inspect_parquet.py "$DEMO_V21"
+```
+
+The converted dataset should contain 7-D `state` and `actions` columns: six Piper joints plus gripper.
+
+## 4. Train Initial Pi0.5 Policy
+
+Train the initial policy from `pi05_base` on the 250-demo dataset. This step is usually run in an OpenPI training environment.
+
+Compute norm stats in OpenPI using the same dataset and action representation used by your Pi0.5 config. Keep the generated `norm_stats.json` with the checkpoint.
+
+Serve the trained initial policy for rollout:
 
 ```bash
 cd "$OPENPI_ROOT"
@@ -200,25 +240,24 @@ export XLA_PYTHON_CLIENT_PREALLOCATE=false
 
 uv run scripts/serve_policy.py policy:checkpoint \
   --policy.config=pi05_Piper_AssembleBlock1_inference \
-  --policy.dir=/path/to/initial_pi05_demo250_checkpoint \
-  --port=8000
+  --policy.dir /path/to/initial_pi05_demo250_checkpoint \
+  --port 8000
 ```
 
-Keep this policy server running for the DAgger rollout step.
+This initial policy is only used to generate DAgger rollout data. The final PiStar policy below is initialized from `pi05_base`, not from this task-finetuned initial policy.
 
-## 3. Collect DAgger Rollout With SpaceMouse
+## 5. Rollout Initial Policy With SpaceMouse DAgger
 
-Target collection:
+Collect 250 rollout episodes with sticky SpaceMouse intervention:
 
 ```text
-total episodes: 250
-success episodes: 200
-failure episodes: 50
-sticky intervention: enabled
-max frames per episode: 1500
+target success: 200 episodes
+target failure: 50 episodes
+sticky intervention: after the first intervention, all later frames are marked intervention
+max frames: 1500
 ```
 
-Run from the PiStar repo:
+Run:
 
 ```bash
 cd "$PISTAR_ROOT"
@@ -259,18 +298,18 @@ scripts/run_pi05_rtc_rollout_collect.sh \
   --rtc-debug false
 ```
 
-Keyboard controls:
+Useful keys:
 
 ```text
 Enter  start episode
 s      save success
 f      save failure
-r      discard episode
+r      discard
 h      home and mark following frames as intervention
 q/Esc  quit
 ```
 
-The run reported here collected:
+Reported collection:
 
 ```text
 saved_total=250
@@ -282,9 +321,9 @@ intervention_frames=18733
 discarded=37
 ```
 
-## 4. Train the VLM Value Function
+## 6. Train VLM Value Function
 
-Train the value model on the DAgger 250 episodes, including both success and failure episodes.
+Train value on the full DAgger set, including both success and failure episodes.
 
 ```bash
 cd "$PISTAR_ROOT"
@@ -310,13 +349,10 @@ PYTHONPATH=src venv/bin/python scripts/train_value.py \
   --load_pretrained
 ```
 
-Optional terminal-only value export:
+Quick terminal-only check:
 
 ```bash
 cd "$PISTAR_ROOT"
-
-export XLA_PYTHON_CLIENT_PREALLOCATE=false
-export JAX_COMPILATION_CACHE_DIR=/tmp/jax_cache
 
 PYTHONPATH=src venv/bin/python scripts/export_vlm_values.py \
   --data_dir "$DAGGER250" \
@@ -329,7 +365,7 @@ PYTHONPATH=src venv/bin/python scripts/export_vlm_values.py \
   --terminal_only
 ```
 
-The reported value model had:
+The reported value model separated terminal success/failure approximately as:
 
 ```text
 success terminal mean ~= -0.415
@@ -337,15 +373,35 @@ failure terminal mean ~= -0.586
 AUC ~= 0.799
 ```
 
-## 5. Label Advantage on DAgger Data
+You can also export a few full episodes and render side-view value curves:
 
-Copy the original DAgger dataset first:
+```bash
+PYTHONPATH=src venv/bin/python scripts/export_vlm_values.py \
+  --data_dir "$DAGGER250" \
+  --checkpoint_dir "$PISTAR_ROOT/checkpoints/value/assemble_block1_dagger250_s200_f50_accum4_r0" \
+  --checkpoint_name step_00010000 \
+  --output_path outputs/assemble_block1_dagger250_value_step10000_selected_episodes.parquet \
+  --tokenizer_path "$VLM_ROOT/tokenizer.model" \
+  --batch_size 4 \
+  --num_workers 0 \
+  --episode_ids 0 1
+
+PYTHONPATH=src venv/bin/python scripts/render_episode_value_video.py \
+  --values_path outputs/assemble_block1_dagger250_value_step10000_selected_episodes.parquet \
+  --output_dir outputs/value_videos \
+  --camera_column side_image \
+  --stride 2
+```
+
+## 7. Label Advantage
+
+Make a copy before modifying labels:
 
 ```bash
 test ! -e "$DAGGER250_ADV" && cp -a "$DAGGER250" "$DAGGER250_ADV"
 ```
 
-Then label advantage:
+Label advantage using the trained value model:
 
 ```bash
 cd "$PISTAR_ROOT"
@@ -366,7 +422,7 @@ PYTHONPATH=src venv/bin/python scripts/label_advantage_from_vlm.py \
   --right_wrist_image_col side_image
 ```
 
-Rule used:
+Label rule:
 
 ```text
 intervention frames -> positive
@@ -385,16 +441,16 @@ intervention_frames=18733
 positive_intervention=18733
 ```
 
-## 6. Build the Policy Dataset
+## 8. Build PiStar Policy Dataset
 
-Final policy data:
+Final policy dataset:
 
 ```text
 demo250_positive + success_dagger200_adv * 3
 episodes = 250 + 200 * 3 = 850
 ```
 
-Convert the sampled demo data into PiStar flat format and mark all demo frames as positive:
+Convert the 250 demos to PiStar flat format and mark them positive:
 
 ```bash
 cd "$PISTAR_ROOT"
@@ -408,11 +464,9 @@ PYTHONPATH=src venv/bin/python scripts/convert_lerobot_v21_to_pistar_flat.py \
   --overwrite
 ```
 
-Keep only successful DAgger episodes:
+Keep successful DAgger episodes:
 
 ```bash
-cd "$PISTAR_ROOT"
-
 PYTHONPATH=src venv/bin/python scripts/filter_success_episodes.py \
   --input-root "$DAGGER250_ADV" \
   --output-root "$DAGGER_SUCCESS200" \
@@ -421,11 +475,9 @@ PYTHONPATH=src venv/bin/python scripts/filter_success_episodes.py \
   --overwrite
 ```
 
-Merge the final policy dataset:
+Merge demos plus three copies of successful DAgger:
 
 ```bash
-cd "$PISTAR_ROOT"
-
 PYTHONPATH=src venv/bin/python scripts/merge_datasets.py \
   --sources \
     "$DEMO250_PISTAR" \
@@ -446,9 +498,9 @@ Expected:
 850
 ```
 
-## 7. Offline Training Setup
+## 9. Train PiStar0.6
 
-In an offline training container, set:
+Offline setup:
 
 ```bash
 cd "$PISTAR_ROOT"
@@ -463,42 +515,28 @@ export HF_DATASETS_CACHE=/tmp/hf_datasets_cache_success200_x3
 export JAX_COMPILATION_CACHE_DIR=/tmp/jax_cache
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
 export JAX_PLATFORMS=cuda,cpu
-
-mkdir -p "$HF_DATASETS_CACHE" "$JAX_COMPILATION_CACHE_DIR"
 ```
 
 Make sure `paligemma_tokenizer.model` exists under `OPENPI_DATA_HOME`. Do not replace it with the VLM Gemma tokenizer.
 
-## 8. Compute Normalization Statistics
+Compute normalization statistics:
 
 ```bash
-cd "$PISTAR_ROOT"
-
 PYTHONPATH=src venv/bin/python scripts/compute_norm_stats.py \
   --config-name pi05_star_assemble_blocks_h50_from_pi05 \
   --repo-id piper/assemble_block1_policy_demo250_success200_x3_r1 \
   --local-data-dir "$POLICY_DATA"
 ```
 
-If you train with:
+If training uses `--assets-base-dir /path/to/pistar_assets`, the norm file should be:
 
-```bash
---assets-base-dir /path/to/pistar_assets
-```
-
-then `norm_stats.json` should be under:
-
-```bash
+```text
 /path/to/pistar_assets/pi05_star_assemble_blocks_h50_from_pi05/piper/assemble_block1_policy_demo250_success200_x3_r1/norm_stats.json
 ```
 
-## 9. Train the PiStar Policy
-
-Example for six H20 GPUs. `--batch-size 192` is the global batch size, not per-GPU batch size.
+Train from `pi05_base`. The batch size is global, not per GPU:
 
 ```bash
-cd "$PISTAR_ROOT"
-
 CUDA_VISIBLE_DEVICES=0,1,2,3,4,5 \
 PYTHONPATH=src venv/bin/python scripts/train.py pi05_star_assemble_blocks_h50_from_pi05 \
   --exp-name rollout2_850 \
@@ -516,17 +554,19 @@ PYTHONPATH=src venv/bin/python scripts/train.py pi05_star_assemble_blocks_h50_fr
   --overwrite
 ```
 
-This command initializes from `pi05_base`, not from a task-specific full fine-tuned pi0.5 checkpoint.
+## 10. Serve and Evaluate With RTC
 
-## 10. Serve the Trained PiStar Policy
-
-Copy the trained checkpoint and matching `norm_stats.json` to the robot machine. If your infer config expects the default Piper asset id, place norm stats under:
+Copy the trained checkpoint and matching `norm_stats.json` to the robot machine. The policy server expects norm stats under the checkpoint assets directory. For the current infer config:
 
 ```bash
-$PISTAR_CKPT/assets/piper/assemble_block1_pistar_30hz_3view/norm_stats.json
+export PISTAR_CKPT=/path/to/checkpoint_step
+
+mkdir -p "$PISTAR_CKPT/assets/piper/assemble_block1_pistar_30hz_3view"
+cp /path/to/norm_stats.json \
+  "$PISTAR_CKPT/assets/piper/assemble_block1_pistar_30hz_3view/norm_stats.json"
 ```
 
-Serve with:
+Serve the policy:
 
 ```bash
 cd "$PISTAR_ROOT"
@@ -541,9 +581,7 @@ PYTHONPATH=src venv/bin/python scripts/serve_policy.py \
   --policy.adv-guidance-beta 1.2
 ```
 
-Use `--policy.adv-guidance-beta 1.0` for the safer baseline.
-
-## 11. Evaluate Success Rate Without Saving Data
+Evaluate without saving rollout data:
 
 ```bash
 cd "$PISTAR_ROOT"
@@ -581,57 +619,33 @@ scripts/run_pi05_rtc_success_eval.sh \
 
 RTC notes:
 
-- `beta=1.0` usually keeps inference latency close to the plain Pi0.5 baseline.
-- `beta>1.0` may require the unconditional branch and increase inference latency.
-- If latency is stable around 140 ms, try `--rtc-inference-delay-steps 5`.
-- For the reported `beta=1.2` run, delay 4 was tested first.
+```text
+--rtc-measure-inference-delay false
+  Use the fixed delay from --rtc-inference-delay-steps.
 
-## 12. Save Evaluation Rollout Data
+--rtc-inference-delay-steps 4
+  Good when latency is around 85-140 ms at 30 Hz.
+  Try 5 if latency is consistently near 140 ms and motion looks delayed.
 
-```bash
-cd "$PISTAR_ROOT"
-
-scripts/run_pi05_rtc_rollout_collect.sh \
-  --control-repo-path "$CONTROL_REPO" \
-  --server-host localhost \
-  --server-port 8000 \
-  --repo-id assemble_block1_rollout2_850_beta12_eval50 \
-  --output-dir "$LEROBOT_ROOT" \
-  --task-name "$TASK_NAME" \
-  --adv-ind positive \
-  --arm-can can0 \
-  --arm-name left_arm \
-  --state-source joint \
-  --cam-head-serial "$HEAD_SERIAL" \
-  --cam-side-serial "$SIDE_SERIAL" \
-  --cam-wrist-serial "$WRIST_SERIAL" \
-  --fps 30 \
-  --control-dt 0.033333 \
-  --action-horizon 50 \
-  --num-episode 50 \
-  --max-step 1500 \
-  --save-adv-ind positive \
-  --enter-label discard \
-  --min-save-frames 30 \
-  --post-reset-sleep 2.0 \
-  --rtc-enabled true \
-  --rtc-execution-horizon 10 \
-  --rtc-max-guidance-weight 10.0 \
-  --rtc-prefix-attention-schedule exp \
-  --rtc-measure-inference-delay false \
-  --rtc-inference-delay-steps 4 \
-  --rtc-prefetch-threshold 20 \
-  --rtc-worker-sleep 0.005 \
-  --rtc-debug false
+--policy.adv-guidance-beta
+  beta=0.0 disables advantage guidance and is useful as an ablation.
+  beta=1.0 is standard conditional guidance.
+  beta>1.0 strengthens positive-advantage guidance, but can increase latency or overshoot.
 ```
 
-## Forking and Upstream
+Local beta sweep on the reported checkpoint:
 
-For a clean public release, a GitHub fork of `ybpy/pistar` is recommended because it shows provenance and makes upstream sync easier.
+```text
+beta=0.0  success=78%
+beta=0.5  success=78%
+beta=1.0  success=84%
+beta=1.1  success=82%
+beta=1.2  success=90%
+beta=1.3  success=76%
+beta=1.5  success=74%
+beta=2.0  success=74%
+```
 
-If this repository was not created with GitHub's Fork button, GitHub will not display "forked from ybpy/pistar" automatically. You have two practical options:
+Use `beta=1.2` only after confirming it on your robot. A conservative default is `beta=1.0`.
 
-1. Keep this repository as an independent derivative and clearly credit upstream in the README.
-2. Create a new fork from `ybpy/pistar`, then push these commits to a branch or to the fork's main branch.
-
-If you want the GitHub UI to show the fork relationship, choose option 2. If you only need a reproducible public repository, option 1 is enough.
+To save evaluation rollout data, use `scripts/run_pi05_rtc_rollout_collect.sh` with the same RTC arguments and a new `--repo-id`.
