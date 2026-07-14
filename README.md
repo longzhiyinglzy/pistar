@@ -2,12 +2,6 @@
 
 This fork is a real-robot reproduction of [ybpy/pistar](https://github.com/ybpy/pistar) for a single-arm Piper setup driven by SpaceMouse demonstrations and SpaceMouse DAgger intervention. It includes the PiStar/OpenPI code plus the Piper collection, conversion, value-labeling, advantage-labeling, training, serving, and RTC evaluation helpers used in the experiment.
 
-Example task prompt used in the reported run:
-
-```text
-Pick up the block1 and assemble it.
-```
-
 The current best local SpaceMouse pipeline run used:
 
 ```text
@@ -54,7 +48,7 @@ export PI05_BASE_PARAMS=/path/to/pi05_base/params
 export HEAD_SERIAL=<head_camera_serial>
 export SIDE_SERIAL=<side_camera_serial>
 export WRIST_SERIAL=<wrist_camera_serial>
-export TASK_NAME="Pick up the block1 and assemble it."
+export TASK_NAME="your language instruction"
 export NUM_DEMOS=<number_of_successful_demo_episodes>
 ```
 
@@ -116,17 +110,6 @@ policy control rate: 30 Hz
 SpaceMouse control rate during DAgger: 200 Hz
 action horizon: 50
 RTC execution horizon: 10
-```
-
-Install and verify robot-side dependencies before running collection:
-
-```bash
-python - <<'PY'
-import piper_sdk
-import pyrealsense2
-print("piper_sdk ok")
-print("pyrealsense2 ok")
-PY
 ```
 
 Set camera serials either through command-line arguments in the rollout/eval scripts or in `control_your_robot/my_robot/camera_config.py`.
