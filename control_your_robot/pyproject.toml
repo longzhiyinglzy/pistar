@@ -19,6 +19,7 @@ dependencies = [
     "opencv-python",
     "keyboard",
     "pyyaml",
+    "evdev",
     "seaborn",
     "seaborn",
 ]

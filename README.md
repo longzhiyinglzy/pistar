@@ -15,6 +15,25 @@ action horizon: 50
 best tested guidance beta: 1.2
 ```
 
+## Environment Setup
+
+Create a dedicated environment instead of relying on a machine-specific Conda environment:
+
+```bash
+git clone https://github.com/longzhiyinglzy/pistar.git
+cd pistar
+
+conda create -n pistar python=3.11 -y
+conda activate pistar
+python -m pip install --upgrade pip
+
+python -m pip install -e control_your_robot/src/robot/piper_sdk
+python -m pip install -e control_your_robot
+python -m pip install "lerobot @ git+https://github.com/huggingface/lerobot.git@0cf864870cf29f4738d3ade893e6fd13fbd7cdb5"
+```
+
+This pins the LeRobot 0.1.0 API used by the HDF5-to-LeRobot v2.1 converter. The editable robot package installs `pyrealsense2`, `evdev`, OpenCV, HDF5, and the remaining collection dependencies. Install `ffmpeg` with the operating-system package manager when exporting video-backed LeRobot datasets.
+
 ## Repository Notes
 
 This repository tracks code and reproducible workflow documentation. Do not commit robot datasets, checkpoints, VLM weights, Pi0.5 weights, `outputs/`, `.idea/`, or private machine paths.
@@ -135,7 +154,7 @@ SpaceMouse -> Piper HDF5 demos -> LeRobot v2.1
 Collect HDF5 demonstrations with the high-frequency SpaceMouse controller:
 
 ```bash
-conda activate lerobot
+conda activate pistar
 cd "$PISTAR_ROOT/control_your_robot"
 
 python example/collect/collect_piper.py \
@@ -166,7 +185,7 @@ An alternate direct LeRobot collector is available at `control_your_robot/exampl
 Convert Piper HDF5 joint-pose demos to LeRobot v2.1:
 
 ```bash
-conda activate pi0
+conda activate pistar
 cd "$PISTAR_ROOT/control_your_robot"
 export HF_LEROBOT_HOME=/path/to/lerobot
 
