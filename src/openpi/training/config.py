@@ -385,7 +385,7 @@ class LeRobotLiberoDataConfig(DataConfigFactory):
                             "observation/state": "state",
                             "actions": "actions",
                             "prompt": "prompt",
-                            "adv_ind": "adv_ind", 
+                            "adv_ind": "adv_ind",
                             # add adv_ind and filter out value, reward, epsilon, adv produced in pistar data processing
                         }
                     )
@@ -1078,7 +1078,7 @@ _CONFIGS = [
             repo_id="ybpy/libero_pistar",
             base_config=DataConfig(prompt_from_task=True),
             extra_delta_transform=False,
-            adv_ind_dropout=False, 
+            adv_ind_dropout=False,
             # Disable adv_ind dropout during inference
         ),
         batch_size=256,
@@ -1476,14 +1476,13 @@ _CONFIGS = [
         num_train_steps=30_000,
         keep_period=1_000,
     ),
-    # Pi05_star Piper block assembly, initialized from pi0.5 base via command-line weight-loader override.
-    # This keeps the 30 Hz / action_horizon=50 setup used by the evaluated Piper policies.
+    # PiStar Piper policy initialized from pi0.5 base via command-line weight-loader override.
     TrainConfig(
-        name="pi05_star_assemble_blocks_h50_from_pi05",
+        name="pi05_star_piper_h50_from_pi05",
         project_name="pistar",
         model=pi0_config.Pi0Config(pi05=True, pistar=True, action_horizon=50, discrete_state_input=False),
         data=LeRobotPiperDataConfig(
-            repo_id="piper/assemble_block1_pistar_30hz_3view",
+            repo_id="piper/your_task_pistar_30hz_3view",
             base_config=DataConfig(prompt_from_task=True),
             extra_delta_transform=True,
             side_image_key="side_image",
@@ -1505,7 +1504,7 @@ _CONFIGS = [
     ),
     # Inference config for the h50 PiStar policy.
     TrainConfig(
-        name="pi05_star_assemble_blocks_h50_from_pi05_infer",
+        name="pi05_star_piper_h50_from_pi05_infer",
         project_name="pistar",
         model=pi0_config.Pi0Config(
             pi05=True,
@@ -1515,7 +1514,7 @@ _CONFIGS = [
             adv_guidance_beta=1.0,
         ),
         data=LeRobotPiperDataConfig(
-            repo_id="piper/assemble_block1_pistar_30hz_3view",
+            repo_id="piper/your_task_pistar_30hz_3view",
             base_config=DataConfig(prompt_from_task=True),
             extra_delta_transform=True,
             adv_ind_dropout=False,
@@ -1744,6 +1743,20 @@ _CONFIGS = [
     *roboarena_config.get_roboarena_configs(),
     *polaris_config.get_polaris_configs(),
 ]
+
+# Backward-compatible names for checkpoints and scripts created before the generic Piper config rename.
+for legacy_name, generic_name in (
+    ("pi05_star_assemble_blocks_h50_from_pi05", "pi05_star_piper_h50_from_pi05"),
+    ("pi05_star_assemble_blocks_h50_from_pi05_infer", "pi05_star_piper_h50_from_pi05_infer"),
+):
+    generic_config = next(config for config in _CONFIGS if config.name == generic_name)
+    _CONFIGS.append(
+        dataclasses.replace(
+            generic_config,
+            name=legacy_name,
+            data=dataclasses.replace(generic_config.data, repo_id="piper/assemble_block1_pistar_30hz_3view"),
+        )
+    )
 
 if len({config.name for config in _CONFIGS}) != len(_CONFIGS):
     raise ValueError("Config names must be unique.")

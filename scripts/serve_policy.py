@@ -31,6 +31,8 @@ class Checkpoint:
     dir: str
     # Optionally override PiStar advantage guidance without editing the training config.
     adv_guidance_beta: float | None = None
+    # Optionally override the checkpoint asset id used to locate norm_stats.json.
+    asset_id: str | None = None
 
 
 @dataclasses.dataclass
@@ -93,6 +95,14 @@ def create_policy(args: Args) -> _policy.Policy:
     match args.policy:
         case Checkpoint():
             train_config = _config.get_config(args.policy.config)
+            if args.policy.asset_id is not None:
+                train_config = dataclasses.replace(
+                    train_config,
+                    data=dataclasses.replace(
+                        train_config.data,
+                        assets=dataclasses.replace(train_config.data.assets, asset_id=args.policy.asset_id),
+                    ),
+                )
             if args.policy.adv_guidance_beta is not None:
                 if not isinstance(train_config.model, pi0_config.Pi0Config) or not train_config.model.pistar:
                     raise ValueError("--policy.adv-guidance-beta requires a PiStar Pi0Config.")
@@ -104,8 +114,9 @@ def create_policy(args: Args) -> _policy.Policy:
                     ),
                 )
             logging.info(
-                "Policy config=%s, adv_guidance_beta=%s",
+                "Policy config=%s, asset_id=%s, adv_guidance_beta=%s",
                 args.policy.config,
+                train_config.data.assets.asset_id,
                 getattr(train_config.model, "adv_guidance_beta", "n/a"),
             )
             return _policy_config.create_trained_policy(
