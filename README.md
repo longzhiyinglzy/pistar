@@ -564,3 +564,98 @@ scripts/run_pi05_rtc_success_eval.sh \
 ```
 
 `beta=0` disables classifier-free advantage guidance, `beta=1` uses the positive-conditioned policy, and `beta>1` increases guidance strength. The RTC delay must match policy-server latency. Measurements on an RTX 4090 were approximately 85 ms with `beta=1` (`delay_steps=4`) and 140 ms with `beta!=1` (`delay_steps=5`). Guidance strength is selected on a held-out real-robot validation set.
+
+## 11. Optional Iterative RECAP Round
+
+After evaluating the first PiStar policy, an additional RECAP round can incorporate states visited by that policy. The conservative protocol used here retrains the value model on all raw rollout rounds, relabels their advantages consistently, and trains the next policy from `pi05_base`.
+
+Define round-two paths:
+
+```bash
+export RECAP_ROLLOUT_R2=$LEROBOT_ROOT/${TASK_ID}_recap_rollout_r2
+export RECAP_ROLLOUT_ALL_R2=$LEROBOT_ROOT/${TASK_ID}_recap_rollout_r1_r2
+export RECAP_ROLLOUT_ADV_R2=$LEROBOT_ROOT/${TASK_ID}_recap_rollout_r1_r2_adv
+export RECAP_SUCCESS_R2=$LEROBOT_ROOT/${TASK_ID}_recap_success_r1_r2_adv
+export RECAP_POLICY_DATA_R2=$LEROBOT_ROOT/${TASK_ID}_recap_policy_r2
+export RECAP_POLICY_REPO_ID=piper/${TASK_ID}_recap_policy_r2
+export RECAP_VALUE_CKPT_R2=$PISTAR_ROOT/checkpoints/value/${TASK_ID}_recap_r2
+```
+
+Serve the current PiStar checkpoint as in Section 10. Collect another rollout set with the command in Section 5, changing the following arguments:
+
+```bash
+--repo-id "$(basename "$RECAP_ROLLOUT_R2")"
+--output-dir "$(dirname "$RECAP_ROLLOUT_R2")"
+--adv-ind positive
+--save-adv-ind none
+```
+
+The new set should retain both successful and failed episodes. SpaceMouse intervention remains sticky within each episode.
+
+Merge the first- and second-round raw rollouts for value learning:
+
+```bash
+cd "$PISTAR_ROOT"
+
+PYTHONPATH=src venv/bin/python scripts/merge_datasets.py \
+  --sources "$DAGGER250" "$RECAP_ROLLOUT_R2" \
+  --output "$RECAP_ROLLOUT_ALL_R2" \
+  --fps 30 \
+  --num-workers 8 \
+  --overwrite
+```
+
+Repeat Section 6 with:
+
+```bash
+--data_dir "$RECAP_ROLLOUT_ALL_R2"
+--checkpoint_dir "$RECAP_VALUE_CKPT_R2"
+```
+
+Initialize this value model from the same SigLIP and Gemma pretrained weights. Retraining from that initialization provides a controlled comparison with the first round; resuming the first value checkpoint is a separate ablation.
+
+Relabel both rollout rounds with the new value model so that all advantage labels use the same value function:
+
+```bash
+test ! -e "$RECAP_ROLLOUT_ADV_R2" && \
+  cp -a "$RECAP_ROLLOUT_ALL_R2" "$RECAP_ROLLOUT_ADV_R2"
+
+HF_DATASETS_CACHE=/tmp/hf_datasets_cache_recap_r2 \
+MPLCONFIGDIR=/tmp/matplotlib-pistar \
+XLA_PYTHON_CLIENT_PREALLOCATE=false \
+JAX_COMPILATION_CACHE_DIR=/tmp/jax_cache \
+PYTHONPATH=src venv/bin/python scripts/label_advantage_from_vlm.py \
+  --data_dir "$RECAP_ROLLOUT_ADV_R2" \
+  --checkpoint_dir "$RECAP_VALUE_CKPT_R2" \
+  --checkpoint_name step_00010000 \
+  --tokenizer_path "$VLM_ROOT/tokenizer.model" \
+  --batch_size 4 \
+  --num_workers 0 \
+  --lookahead 50 \
+  --top_percent 30 \
+  --right_wrist_image_col side_image
+```
+
+Keep only successful rollout episodes for policy training, then rebuild the policy dataset. The example retains the first-round DAgger weight of three:
+
+```bash
+PYTHONPATH=src venv/bin/python scripts/filter_success_episodes.py \
+  --input-root "$RECAP_ROLLOUT_ADV_R2" \
+  --output-root "$RECAP_SUCCESS_R2" \
+  --criterion reward \
+  --num-workers 8 \
+  --overwrite
+
+PYTHONPATH=src venv/bin/python scripts/merge_datasets.py \
+  --sources \
+    "$DEMO250_PISTAR" \
+    "$RECAP_SUCCESS_R2" \
+    "$RECAP_SUCCESS_R2" \
+    "$RECAP_SUCCESS_R2" \
+  --output "$RECAP_POLICY_DATA_R2" \
+  --fps 30 \
+  --num-workers 8 \
+  --overwrite
+```
+
+Finally, repeat Section 9 with `RECAP_POLICY_DATA_R2` and `RECAP_POLICY_REPO_ID`. Recompute normalization statistics for the rebuilt dataset and initialize the policy from `PI05_BASE_PARAMS`. Warm-starting from the preceding PiStar checkpoint should be treated as a separate experiment. Continue RECAP rounds only while held-out real-robot performance improves.
