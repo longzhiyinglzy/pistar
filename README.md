@@ -142,7 +142,7 @@ Keyboard controls:
 ```text
 Enter  start episode, then save and stop current episode
 r      discard current episode and retry the same episode index
-h      discard the current trajectory, home the arm, and retry the same episode
+h      home the arm and continue recording the same episode
 ```
 
 This script uses a 200 Hz SpaceMouse control loop and a 30 Hz camera-aligned sampling loop. The default `can0` arm, 10% Cartesian motion speed, and 10% reset speed match the tested single-arm setup. It is not the same as the direct LeRobot collector: it saves raw HDF5 first, including synchronized state/action buffers, then conversion produces the LeRobot v2.1 dataset.

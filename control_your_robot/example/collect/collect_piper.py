@@ -748,7 +748,7 @@ def main():
                     "main",
                     (
                         f"episode {episode_id}: start teleop | control={CONTROL_HZ}Hz | collect={COLLECT_HZ}Hz | "
-                        "Enter=save&stop, r=redo episode, h=home and redo episode"
+                        "Enter=save&stop, r=redo episode, h=home arm and continue"
                     ),
                     "INFO"
                 )
@@ -779,23 +779,32 @@ def main():
                     if cmd == "home":
                         debug_print(
                             "main",
-                            f"episode {episode_id}: keyboard 'h' -> discard current round, home arm, and retry",
+                            f"episode {episode_id}: keyboard 'h' -> home arm and continue current episode",
                             "INFO"
                         )
-                        stop_action = "home"
-                        break
+                        robot.reset()
+                        time.sleep(1.0)
+                        try:
+                            robot.controllers["arm"]["left_arm"].set_gripper(RESET_GRIPPER)
+                            time.sleep(0.3)
+                        except Exception as e:
+                            print(f"[episode {episode_id}] keyboard home reset gripper failed: {e}", flush=True)
+
+                        home_master_data = master.read()
+                        buffers.update_button_and_gripper_state(
+                            prev_left_button=int(home_master_data.get("left_button", 0)),
+                            prev_right_button=int(home_master_data.get("right_button", 0)),
+                            cmd_gripper=RESET_GRIPPER,
+                            last_sent_gripper=RESET_GRIPPER,
+                        )
 
                 if stop_action == "save":
                     time.sleep(0.2)
                 control_scheduler.stop()
                 collect_scheduler.stop()
 
-                if stop_action in {"redo", "home"}:
-                    debug_print(
-                        "main",
-                        f"episode {episode_id}: {stop_action} -> reset now and restart this episode",
-                        "INFO",
-                    )
+                if stop_action == "redo":
+                    debug_print("main", f"episode {episode_id}: redo -> reset now and restart this episode", "INFO")
                     robot.reset()
                     time.sleep(1.0)
                     try:
