@@ -37,7 +37,7 @@ if SRC_ROOT not in sys.path:
 
 from robot.utils.base.data_handler import debug_print
 from robot.data.collect_any import CollectAny
-from robot.controller.SpaceMouse_controller import SpaceMouseController
+from robot.controller.spacemouse_piper_utils import SpaceMouseReader
 from my_robot.agilex_piper_single_base import PiperSingle
 from robot.utils.node.node import TaskNode
 from robot.utils.node.scheduler import Scheduler
@@ -431,7 +431,7 @@ class SpaceMouseControlNode(TaskNode):
         t_loop = time.monotonic()
 
         # 1) 读 SpaceMouse
-        master_data = self.master.get()
+        master_data = self.master.read()
         raw = np.array(master_data.get("raw", np.zeros(6)), dtype=np.float64)
         left_button = int(master_data.get("left_button", 0))
         right_button = int(master_data.get("right_button", 0))
@@ -631,6 +631,9 @@ def build_arg_parser():
     parser.add_argument("--task-name", default=condition["task_name"])
     parser.add_argument("--num-episode", type=int, default=100)
     parser.add_argument("--spacemouse-device-path", default=None)
+    parser.add_argument("--arm-can", default="can0")
+    parser.add_argument("--motion-speed-percent", type=int, default=10)
+    parser.add_argument("--reset-speed-percent", type=int, default=10)
     return parser
 
 
@@ -646,6 +649,12 @@ def main():
 
     num_episode = int(args.num_episode)
     device_path = args.spacemouse_device_path
+    for name, value in (
+        ("--motion-speed-percent", args.motion_speed_percent),
+        ("--reset-speed-percent", args.reset_speed_percent),
+    ):
+        if not 1 <= value <= 100:
+            raise ValueError(f"{name} must be between 1 and 100.")
 
     kb_fd, kb_old_attrs, kb_owns_fd = setup_keyboard_cbreak_mode()
     debug_print("main", f"running script: {os.path.abspath(__file__)}", "INFO")
@@ -660,15 +669,17 @@ def main():
     master = None
     try:
         # 1) 初始化 SpaceMouse
-        master = SpaceMouseController(
-            name="spacemouse",
-            initial_gripper=0.0,
+        master = SpaceMouseReader(
+            device_path=device_path,
+            grab_device=True,
         )
-        master.set_collect_info(["raw", "left_button", "right_button"])
-        master.set_up(device_path=device_path, grab_device=True)
 
         # 2) 初始化 Piper
-        robot = PiperSingle()
+        robot = PiperSingle(
+            arm_can=args.arm_can,
+            motion_speed_percent=args.motion_speed_percent,
+            reset_speed_percent=args.reset_speed_percent,
+        )
         robot.set_up()
         enable_sensor_jpeg(robot)
 
@@ -716,7 +727,7 @@ def main():
                 buffers = TeleopBuffers()
 
                 # 清一次按钮初值，避免刚开始误触发
-                init_master_data = master.get()
+                init_master_data = master.read()
                 buffers.reset(
                     left_button_init=int(init_master_data.get("left_button", 0)),
                     right_button_init=int(init_master_data.get("right_button", 0)),
@@ -737,7 +748,7 @@ def main():
                     "main",
                     (
                         f"episode {episode_id}: start teleop | control={CONTROL_HZ}Hz | collect={COLLECT_HZ}Hz | "
-                        "Enter=save&stop, r=redo episode, h=home arm"
+                        "Enter=save&stop, r=redo episode, h=home and redo episode"
                     ),
                     "INFO"
                 )
@@ -768,33 +779,23 @@ def main():
                     if cmd == "home":
                         debug_print(
                             "main",
-                            f"episode {episode_id}: keyboard 'h' -> arm reset to home and continue recording current trajectory",
+                            f"episode {episode_id}: keyboard 'h' -> discard current round, home arm, and retry",
                             "INFO"
                         )
-                        robot.reset()
-                        time.sleep(1.0)
-                        try:
-                            robot.controllers["arm"]["left_arm"].set_gripper(RESET_GRIPPER)
-                            time.sleep(0.3)
-                        except Exception as e:
-                            print(f"[episode {episode_id}] keyboard home reset gripper failed: {e}", flush=True)
-
-                        # 仅重置按钮边沿/夹爪状态，保留本轮轨迹数据连续录制
-                        home_master_data = master.get()
-                        buffers.update_button_and_gripper_state(
-                            prev_left_button=int(home_master_data.get("left_button", 0)),
-                            prev_right_button=int(home_master_data.get("right_button", 0)),
-                            cmd_gripper=RESET_GRIPPER,
-                            last_sent_gripper=RESET_GRIPPER,
-                        )
+                        stop_action = "home"
+                        break
 
                 if stop_action == "save":
                     time.sleep(0.2)
                 control_scheduler.stop()
                 collect_scheduler.stop()
 
-                if stop_action == "redo":
-                    debug_print("main", f"episode {episode_id}: keyboard 'r' -> reset now and restart this episode", "INFO")
+                if stop_action in {"redo", "home"}:
+                    debug_print(
+                        "main",
+                        f"episode {episode_id}: {stop_action} -> reset now and restart this episode",
+                        "INFO",
+                    )
                     robot.reset()
                     time.sleep(1.0)
                     try:

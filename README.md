@@ -125,13 +125,16 @@ SpaceMouse -> Piper HDF5 demos -> LeRobot v2.1
 Collect HDF5 demonstrations with the high-frequency SpaceMouse controller:
 
 ```bash
-conda activate pi0
+conda activate lerobot
 cd "$PISTAR_ROOT/control_your_robot"
 
 python example/collect/collect_piper.py \
   --save-path "$HDF5_ROOT" \
   --task-name "$HDF5_TASK_NAME" \
-  --num-episode "$NUM_DEMOS"
+  --num-episode "$NUM_DEMOS" \
+  --arm-can can0 \
+  --motion-speed-percent 10 \
+  --reset-speed-percent 10
 ```
 
 Keyboard controls:
@@ -139,10 +142,10 @@ Keyboard controls:
 ```text
 Enter  start episode, then save and stop current episode
 r      discard current episode and retry the same episode index
-h      home the arm and continue recording the same trajectory
+h      discard the current trajectory, home the arm, and retry the same episode
 ```
 
-This script uses a 200 Hz SpaceMouse control loop and a 30 Hz camera-aligned sampling loop. It is not the same as the direct LeRobot collector: it saves raw HDF5 first, including synchronized state/action buffers, then conversion produces the LeRobot v2.1 dataset.
+This script uses a 200 Hz SpaceMouse control loop and a 30 Hz camera-aligned sampling loop. The default `can0` arm, 10% Cartesian motion speed, and 10% reset speed match the tested single-arm setup. It is not the same as the direct LeRobot collector: it saves raw HDF5 first, including synchronized state/action buffers, then conversion produces the LeRobot v2.1 dataset.
 
 An alternate direct LeRobot collector is available at `control_your_robot/example/collect/collect_lerobot_spacemouse_piper_teleop.py`, but the HDF5 route above matches the tested Pi0.5/PiStar data pipeline.
 

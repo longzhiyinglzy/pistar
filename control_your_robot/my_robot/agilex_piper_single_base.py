@@ -41,10 +41,21 @@ condition = {
 
 
 class PiperSingle(Robot):
-    def __init__(self, condition=condition, move_check=True, start_episode=0):
+    def __init__(
+        self,
+        condition=condition,
+        move_check=True,
+        start_episode=0,
+        arm_can="can0",
+        motion_speed_percent=10,
+        reset_speed_percent=10,
+    ):
         super().__init__(condition=condition, move_check=move_check, start_episode=start_episode)
 
         self.condition = condition
+        self.arm_can = arm_can
+        self.motion_speed_percent = int(motion_speed_percent)
+        self.reset_speed_percent = int(reset_speed_percent)
         self.camera_serials = get_piper_camera_serials("single")
         self.controllers = {
             "arm":{
@@ -62,12 +73,17 @@ class PiperSingle(Robot):
 
     # ============== init ==============
     def reset(self):
-        self.controllers["arm"]["left_arm"].reset(np.array(START_POSITION_ANGLE_LEFT_ARM))
+        self.controllers["arm"]["left_arm"].reset(
+            np.array(START_POSITION_ANGLE_LEFT_ARM),
+            speed_percent=self.reset_speed_percent,
+        )
 
     def set_up(self):
         super().set_up()
 
-        self.controllers["arm"]["left_arm"].set_up("can1")
+        arm_controller = self.controllers["arm"]["left_arm"]
+        arm_controller.set_up(self.arm_can)
+        arm_controller.set_motion_speed_percent(self.motion_speed_percent)
         self.sensors["image"]["cam_head"].set_up(self.camera_serials["head"])
         self.sensors["image"]["cam_wrist"].set_up(self.camera_serials["wrist"])
         if "side" in self.camera_serials:

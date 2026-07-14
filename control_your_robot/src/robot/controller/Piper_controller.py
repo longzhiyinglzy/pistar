@@ -19,6 +19,7 @@ class PiperController(ArmController):
         self.controller_type = "user_controller"
         self.controller = None
         self.gripper_effort = 1000
+        self.motion_speed_percent = 100
     
     def set_up(self, can:str):
         piper = C_PiperInterface_V2(can)
@@ -33,6 +34,12 @@ class PiperController(ArmController):
         except :
             print(f"reset error")
         return
+
+    def set_motion_speed_percent(self, speed_percent):
+        speed_percent = int(speed_percent)
+        if not 1 <= speed_percent <= 100:
+            raise ValueError("speed_percent must be between 1 and 100")
+        self.motion_speed_percent = speed_percent
 
     # 返回单位为米
     def get_state(self):
@@ -52,7 +59,7 @@ class PiperController(ArmController):
         x, y, z, rx, ry, rz = position*1000*1000
         x, y, z, rx, ry, rz = int(x), int(y), int(z), int(rx), int(ry), int(rz)
 
-        self.controller.MotionCtrl_2(0x01, 0x00, 100, 0x00)
+        self.controller.MotionCtrl_2(0x01, 0x00, self.motion_speed_percent, 0x00)
         self.controller.EndPoseCtrl(x, y, z, rx, ry, rz)
     
     def set_joint(self, joint, speed_percent=100):
