@@ -114,6 +114,16 @@ RTC execution horizon: 10
 
 Set camera serials either through command-line arguments in the rollout/eval scripts or in `control_your_robot/my_robot/camera_config.py`.
 
+Activate the Piper CAN interface after each reboot or USB-CAN reconnect:
+
+```bash
+cd "$PISTAR_ROOT/control_your_robot"
+bash src/robot/piper_sdk/piper_sdk/can_activate.sh can0 1000000
+ip -details link show can0
+```
+
+Before starting collection, confirm that the interface reports `state UP`, `can state ERROR-ACTIVE`, and `bitrate 1000000`.
+
 ## 2. Collect HDF5 / LeRobot v2.1 Demos With SpaceMouse
 
 The tested route is:
@@ -136,6 +146,8 @@ python example/collect/collect_piper.py \
   --motion-speed-percent 10 \
   --reset-speed-percent 10
 ```
+
+The collector automatically searches for a 3Dconnexion SpaceMouse. To select a specific input device, append `--spacemouse-device-path /dev/input/eventX` after identifying it with `python -c "from evdev import InputDevice, list_devices; print([(p, InputDevice(p).name) for p in list_devices()])"`.
 
 Keyboard controls:
 
