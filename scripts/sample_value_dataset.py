@@ -59,34 +59,65 @@ def _terminal_value(path: Path) -> float:
     if len(values) == 0:
         raise ValueError(f"Episode contains no frames: {path}")
     value = values[-1].as_py()
-    if isinstance(value, (list, tuple)):
+    if isinstance(value, list | tuple):
         value = value[0]
     return float(value)
 
 
-def _classify_episodes(root: Path, threshold: float) -> tuple[list[int], list[int], dict[int, Path]]:
+def _episode_has_intervention(path: Path) -> bool:
+    table = pq.read_table(path, columns=["intervention"])
+    values = table.column("intervention").combine_chunks().to_pylist()
+    for value in values:
+        if isinstance(value, list | tuple):
+            if any(bool(item) for item in value):
+                return True
+        elif bool(value):
+            return True
+    return False
+
+
+def _classify_episodes(root: Path, threshold: float) -> tuple[dict[str, list[int]], dict[int, Path]]:
     files = _episode_files(root)
     if not files:
         raise FileNotFoundError(f"No episode parquet files found under {root / 'data'}")
 
-    success: list[int] = []
-    failure: list[int] = []
+    groups: dict[str, list[int]] = {
+        "success_intervention": [],
+        "success_autonomous": [],
+        "failure": [],
+    }
     for episode_index, path in sorted(files.items()):
         if _terminal_value(path) > threshold:
-            success.append(episode_index)
+            group = "success_intervention" if _episode_has_intervention(path) else "success_autonomous"
+            groups[group].append(episode_index)
         else:
-            failure.append(episode_index)
-    return success, failure, files
+            groups["failure"].append(episode_index)
+    return groups, files
 
 
-def _sample(indices: list[int], count: int, rng: random.Random, description: str) -> list[int]:
+def _sample(
+    indices: list[int],
+    count: int,
+    rng: random.Random,
+    description: str,
+    strategy: str,
+) -> list[int]:
     if count < 0:
         raise ValueError(f"{description} count must be non-negative, got {count}")
     if count > len(indices):
         raise ValueError(f"Requested {count} {description} episodes, but only {len(indices)} are available")
     if count == len(indices):
         return sorted(indices)
-    return sorted(rng.sample(indices, count))
+    if strategy == "random":
+        return sorted(rng.sample(indices, count))
+    if strategy == "stratified":
+        selected: list[int] = []
+        for bin_index in range(count):
+            start = bin_index * len(indices) // count
+            end = max((bin_index + 1) * len(indices) // count, start + 1)
+            selected.append(rng.choice(indices[start:end]))
+        return sorted(selected)
+    raise ValueError(f"Unsupported sampling strategy: {strategy}")
 
 
 def _create_selected_source(source: Path, destination: Path, selected: list[int], files: dict[int, Path]) -> None:
@@ -127,9 +158,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--success-counts",
         nargs="+",
-        required=True,
         type=int,
-        help="Successful episodes to sample from each source, aligned with --sources.",
+        help="Successful episodes to sample from each source without intervention stratification.",
+    )
+    parser.add_argument(
+        "--intervention-success-counts",
+        nargs="+",
+        type=int,
+        help="Successful intervention episodes to sample from each source.",
+    )
+    parser.add_argument(
+        "--autonomous-success-counts",
+        nargs="+",
+        type=int,
+        help="Successful autonomous episodes to sample from each source.",
     )
     parser.add_argument(
         "--failure-counts",
@@ -141,6 +183,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output", required=True, help="Output dataset root; source datasets are not modified.")
     parser.add_argument("--seed", type=int, default=42, help="Deterministic sampling seed.")
     parser.add_argument(
+        "--sampling-strategy",
+        choices=("random", "stratified"),
+        default="random",
+        help="Episode selection strategy within each outcome/intervention group.",
+    )
+    parser.add_argument(
         "--terminal-threshold",
         type=float,
         default=-0.5,
@@ -149,6 +197,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--fps", type=int, default=None, help="Optional output FPS override.")
     parser.add_argument("--num-workers", type=int, default=0, help="Worker count passed to merge_datasets.py.")
     parser.add_argument("--overwrite", action="store_true", help="Overwrite an existing output dataset.")
+    parser.add_argument("--dry-run", action="store_true", help="Print the selection without creating a dataset.")
     return parser.parse_args()
 
 
@@ -156,30 +205,90 @@ def main() -> None:
     args = parse_args()
     sources = [Path(value).expanduser().resolve() for value in args.sources]
     output = Path(args.output).expanduser().resolve()
-    if len(args.success_counts) != len(sources) or len(args.failure_counts) != len(sources):
-        raise ValueError("--success-counts and --failure-counts must each contain one value per source")
+    grouped_success_mode = args.intervention_success_counts is not None or args.autonomous_success_counts is not None
+    if grouped_success_mode:
+        if args.success_counts is not None:
+            raise ValueError("Use either --success-counts or the two stratified success-count arguments, not both")
+        if args.intervention_success_counts is None or args.autonomous_success_counts is None:
+            raise ValueError(
+                "--intervention-success-counts and --autonomous-success-counts must be provided together"
+            )
+        success_count_groups = (args.intervention_success_counts, args.autonomous_success_counts)
+    else:
+        if args.success_counts is None:
+            raise ValueError(
+                "Provide --success-counts, or provide both intervention/autonomous success counts"
+            )
+        success_count_groups = (args.success_counts,)
+
+    count_groups = (*success_count_groups, args.failure_counts)
+    if any(len(counts) != len(sources) for counts in count_groups):
+        raise ValueError("Every count argument must contain one value per --sources entry")
 
     rng = random.Random(args.seed)
     selections: list[dict[str, Any]] = []
     source_files: list[dict[int, Path]] = []
-    for source, success_count, failure_count in zip(
-        sources, args.success_counts, args.failure_counts, strict=True
-    ):
-        success, failure, files = _classify_episodes(source, args.terminal_threshold)
-        selected_success = _sample(success, success_count, rng, f"success episodes from {source.name}")
-        selected_failure = _sample(failure, failure_count, rng, f"failure episodes from {source.name}")
+    for source_index, source in enumerate(sources):
+        groups, files = _classify_episodes(source, args.terminal_threshold)
+        success_intervention = groups["success_intervention"]
+        success_autonomous = groups["success_autonomous"]
+        failure = groups["failure"]
+
+        if grouped_success_mode:
+            selected_success_intervention = _sample(
+                success_intervention,
+                args.intervention_success_counts[source_index],
+                rng,
+                f"successful intervention episodes from {source.name}",
+                args.sampling_strategy,
+            )
+            selected_success_autonomous = _sample(
+                success_autonomous,
+                args.autonomous_success_counts[source_index],
+                rng,
+                f"successful autonomous episodes from {source.name}",
+                args.sampling_strategy,
+            )
+        else:
+            success = sorted(success_intervention + success_autonomous)
+            selected_success = _sample(
+                success,
+                args.success_counts[source_index],
+                rng,
+                f"success episodes from {source.name}",
+                args.sampling_strategy,
+            )
+            intervention_set = set(success_intervention)
+            selected_success_intervention = [value for value in selected_success if value in intervention_set]
+            selected_success_autonomous = [value for value in selected_success if value not in intervention_set]
+
+        selected_success = sorted(selected_success_intervention + selected_success_autonomous)
+        selected_failure = _sample(
+            failure,
+            args.failure_counts[source_index],
+            rng,
+            f"failure episodes from {source.name}",
+            args.sampling_strategy,
+        )
         selections.append(
             {
                 "source": str(source),
-                "available_success": len(success),
+                "available_success": len(success_intervention) + len(success_autonomous),
+                "available_success_intervention": len(success_intervention),
+                "available_success_autonomous": len(success_autonomous),
                 "available_failure": len(failure),
                 "selected_success": selected_success,
+                "selected_success_intervention": selected_success_intervention,
+                "selected_success_autonomous": selected_success_autonomous,
                 "selected_failure": selected_failure,
             }
         )
         source_files.append(files)
         print(
-            f"{source.name}: selected success={len(selected_success)}/{len(success)}, "
+            f"{source.name}: selected success={len(selected_success)}/"
+            f"{len(success_intervention) + len(success_autonomous)} "
+            f"(intervention={len(selected_success_intervention)}/{len(success_intervention)}, "
+            f"autonomous={len(selected_success_autonomous)}/{len(success_autonomous)}), "
             f"failure={len(selected_failure)}/{len(failure)}",
             flush=True,
         )
@@ -192,6 +301,10 @@ def main() -> None:
         f"failure_ratio={total_failure / total:.1%}",
         flush=True,
     )
+
+    if args.dry_run:
+        print("Dry run: no output dataset was created.", flush=True)
+        return
 
     script_dir = Path(__file__).resolve().parent
     with tempfile.TemporaryDirectory(prefix="pistar_value_subset_") as temp_value:
@@ -223,6 +336,7 @@ def main() -> None:
 
     manifest = {
         "seed": args.seed,
+        "sampling_strategy": args.sampling_strategy,
         "terminal_threshold": args.terminal_threshold,
         "total_success": total_success,
         "total_failure": total_failure,
