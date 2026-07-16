@@ -7,6 +7,7 @@ dataset/
 dataset_meta_info/
 synthetic_traj/
 replay_outputs/
+outputs/
 init_gt_all/
 代码
 !gemma/
