@@ -238,7 +238,7 @@ def _write_output(rows: list[dict[str, Any]], output_path: Path) -> None:
         output.to_parquet(output_path, index=False)
 
 
-def _terminal_cache_path(
+def _selected_rows_cache_path(
     *,
     data_dir: Path,
     output_path: Path,
@@ -254,6 +254,7 @@ def _terminal_cache_path(
                 stat.st_size,
                 stat.st_mtime_ns,
                 request.episode_id,
+                request.dataset_row_indices.tolist(),
             )
         )
     payload = {
@@ -262,10 +263,10 @@ def _terminal_cache_path(
         "columns": selected_columns,
     }
     digest = hashlib.sha1(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()[:16]
-    return output_path.parent / ".vlm_terminal_cache" / f"{data_dir.name}-{digest}.parquet"
+    return output_path.parent / ".vlm_selected_rows_cache" / f"{data_dir.name}-{digest}.parquet"
 
 
-def _build_terminal_cache(
+def _build_selected_rows_cache(
     *,
     data_dir: Path,
     output_path: Path,
@@ -300,7 +301,7 @@ def _build_terminal_cache(
             if column
         )
     )
-    cache_path = _terminal_cache_path(
+    cache_path = _selected_rows_cache_path(
         data_dir=data_dir,
         output_path=output_path,
         requests=requests,
@@ -308,18 +309,21 @@ def _build_terminal_cache(
     )
     if cache_path.exists():
         cached = pq.read_table(cache_path, columns=["episode_index"])
-        cached_episode_ids = [int(value) for value in cached.column("episode_index").to_pylist()]
+        cached_episode_ids = list(
+            dict.fromkeys(int(value) for value in cached.column("episode_index").to_pylist())
+        )
         expected_episode_ids = [request.episode_id for request in requests]
-        if cached_episode_ids == expected_episode_ids:
-            LOG.info("Reusing compact terminal-frame cache: %s", cache_path)
+        expected_rows = sum(len(request.dataset_row_indices) for request in requests)
+        if cached_episode_ids == expected_episode_ids and len(cached) == expected_rows:
+            LOG.info("Reusing compact selected-row cache: %s", cache_path)
             return cache_path
-        LOG.warning("Terminal-frame cache metadata does not match; rebuilding: %s", cache_path)
+        LOG.warning("Selected-row cache metadata does not match; rebuilding: %s", cache_path)
 
     rows: list[dict[str, Any]] = []
     output_schema = None
     for request in tqdm(
         requests,
-        desc="构建终点帧缓存",
+        desc="构建选定帧缓存",
         bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]",
     ):
         parquet_file = pq.ParquetFile(request.parquet_path)
@@ -328,20 +332,32 @@ def _build_terminal_cache(
         table = parquet_file.read(columns=columns)
         if len(table) == 0:
             continue
-        terminal_row = table.slice(len(table) - 1, 1).to_pylist()[0]
-        rows.append(terminal_row)
+        if "index" in table.column_names:
+            row_keys = [int(value) for value in table.column("index").to_pylist()]
+            requested_keys = [int(value) for value in request.dataset_row_indices.tolist()]
+        elif "frame_index" in table.column_names:
+            row_keys = [int(value) for value in table.column("frame_index").to_pylist()]
+            requested_keys = [int(value) for value in request.step_indices.tolist()]
+        else:
+            raise ValueError(f"Cannot align selected rows in {request.parquet_path}: no index/frame_index column")
+        row_positions = {key: position for position, key in enumerate(row_keys)}
+        missing_keys = [key for key in requested_keys if key not in row_positions]
+        if missing_keys:
+            raise ValueError(f"Selected rows not found in {request.parquet_path}: {missing_keys[:5]}")
+        selected = table.take(pa.array([row_positions[key] for key in requested_keys], type=pa.int64()))
+        rows.extend(selected.to_pylist())
         if output_schema is None:
             output_schema = table.select(columns).schema
 
     if not rows or output_schema is None:
-        raise ValueError("No terminal rows were available for compact inference")
+        raise ValueError("No selected rows were available for compact inference")
 
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     temp_path = cache_path.with_suffix(cache_path.suffix + ".tmp")
     compact_table = pa.Table.from_pylist(rows, schema=output_schema)
     pq.write_table(compact_table, temp_path, compression="zstd")
     os.replace(temp_path, cache_path)
-    LOG.info("Created compact terminal-frame cache with %d rows: %s", len(rows), cache_path)
+    LOG.info("Created compact selected-row cache with %d rows: %s", len(rows), cache_path)
     return cache_path
 
 
@@ -485,8 +501,8 @@ def main() -> None:
     tasks_map = _load_tasks_map(data_dir) if (data_dir / "meta" / "tasks.jsonl").exists() else None
     raw_dataset = None
     inference_dataset_indices = selected_dataset_indices
-    if args.terminal_only:
-        terminal_cache_path = _build_terminal_cache(
+    if args.terminal_only or args.episode_ids is not None:
+        selected_rows_cache_path = _build_selected_rows_cache(
             data_dir=data_dir,
             output_path=output_path,
             requests=requests,
@@ -495,7 +511,7 @@ def main() -> None:
             right_wrist_image_col=args.right_wrist_image_col,
             instruction_col=args.instruction_col,
         )
-        raw_dataset = CompactParquetDataset(terminal_cache_path)
+        raw_dataset = CompactParquetDataset(selected_rows_cache_path)
         inference_dataset_indices = list(range(len(raw_dataset)))
 
     dataset = _build_inference_dataset(
