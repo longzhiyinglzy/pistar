@@ -708,6 +708,23 @@ class IndexedDataset:
         return len(self._indices)
 
 
+class PaddedDataset:
+    """Pad inference to a fixed batch shape by repeating the final sample."""
+
+    def __init__(self, dataset, multiple: int):
+        self._dataset = dataset
+        self._original_length = len(dataset)
+        if self._original_length <= 0:
+            raise ValueError("Cannot pad an empty inference dataset")
+        self._length = math.ceil(self._original_length / multiple) * multiple
+
+    def __getitem__(self, index: int):
+        return self._dataset[min(index, self._original_length - 1)]
+
+    def __len__(self) -> int:
+        return self._length
+
+
 def _get_prefetch_factor(num_workers: int) -> int | None:
     if num_workers <= 0:
         return None
@@ -810,8 +827,10 @@ def _compute_values_with_dataloader(
     generator = torch.Generator()
     generator.manual_seed(seed)
 
+    original_size = len(dataset)
+    padded_dataset = PaddedDataset(dataset, batch_size)
     loader_kwargs: dict[str, Any] = {
-        "dataset": dataset,
+        "dataset": padded_dataset,
         "batch_size": batch_size,
         "shuffle": False,
         "num_workers": num_workers,
@@ -835,7 +854,7 @@ def _compute_values_with_dataloader(
 
     pbar = tqdm(
         torch_loader,
-        total=math.ceil(len(dataset) / batch_size),
+        total=math.ceil(original_size / batch_size),
         desc="VLM value 推理",
         bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]",
     )
@@ -851,6 +870,12 @@ def _compute_values_with_dataloader(
         available_keys = list(observation.images.keys())
         observation = _model.preprocess_observation(rng, observation, train=False, image_keys=available_keys)
         values_batch = np.asarray(jax.device_get(infer_fn(model_state, observation)), dtype=np.float32)
+        valid_count = min(len(values_batch), original_size - len(cache.flat_values))
+        values_batch = values_batch[:valid_count]
+        if episode_indices is not None:
+            episode_indices = episode_indices[:valid_count]
+        if frame_indices is not None:
+            frame_indices = frame_indices[:valid_count]
         cache.flat_values.extend(values_batch.tolist())
 
         if episode_indices is None:
