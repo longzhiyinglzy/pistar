@@ -38,6 +38,7 @@ if os.getenv("OPENPI_SILENCE_TF", "1") != "0":
 
 import argparse
 import dataclasses
+import gc
 import io
 import json
 import logging
@@ -45,7 +46,7 @@ import math
 import multiprocessing
 import sys
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from datasets.features.features import Features, _FEATURE_TYPES
 import numpy as np
@@ -54,6 +55,9 @@ from PIL import Image
 import pyarrow.parquet as pq
 import torch
 from tqdm import tqdm
+
+if TYPE_CHECKING:
+    from openpi.models.value_model_config import ValueModelConfig
 
 if "List" not in _FEATURE_TYPES:
     _FEATURE_TYPES["List"] = _FEATURE_TYPES["Sequence"]
@@ -725,6 +729,18 @@ class PaddedDataset:
         return self._length
 
 
+def _merge_value_caches(target: InferredValueCache, source: InferredValueCache) -> None:
+    target.flat_values.extend(source.flat_values)
+    for episode_id, values in source.values_by_episode.items():
+        if episode_id in target.values_by_episode:
+            raise ValueError(f"Duplicate value results for episode {episode_id}")
+        target.values_by_episode[episode_id] = values
+    for episode_id, frame_values in source.values_by_episode_frame.items():
+        if episode_id in target.values_by_episode_frame:
+            raise ValueError(f"Duplicate frame-level value results for episode {episode_id}")
+        target.values_by_episode_frame[episode_id] = frame_values
+
+
 def _get_prefetch_factor(num_workers: int) -> int | None:
     if num_workers <= 0:
         return None
@@ -749,8 +765,9 @@ def _build_inference_dataset(
     copy_wrist_to_right: bool,
     tasks_map: dict[int, str] | None,
     raw_dataset=None,
+    episode_ids: list[int] | None = None,
 ):
-    from openpi.models.value_model_config import ValueModelConfig
+    from lerobot.common.datasets import lerobot_dataset
     import openpi.training.config as _config
     import openpi.training.data_loader as _data_loader
 
@@ -781,7 +798,29 @@ def _build_inference_dataset(
     )
     dataset = raw_dataset
     if dataset is None:
-        dataset = _data_loader.create_torch_dataset(data_config, model_config.action_horizon, model_config)
+        if episode_ids is None:
+            dataset = _data_loader.create_torch_dataset(data_config, model_config.action_horizon, model_config)
+        else:
+            dataset_meta = lerobot_dataset.LeRobotDatasetMetadata(str(data_dir))
+            dataset = lerobot_dataset.LeRobotDataset(
+                str(data_dir),
+                episodes=episode_ids,
+                delta_timestamps={
+                    key: [t / dataset_meta.fps for t in range(model_config.action_horizon)]
+                    for key in data_config.action_sequence_keys
+                },
+            )
+            # LeRobot v2.1 builds subset start/end tensors in local episode order,
+            # while __getitem__ indexes them with the original episode_index.
+            # Expand the tensors so non-zero-based episode chunks remain valid.
+            if episode_ids and dataset.episode_data_index:
+                expanded_size = max(episode_ids) + 1
+                for key, local_values in dataset.episode_data_index.items():
+                    expanded = torch.zeros(expanded_size, dtype=local_values.dtype)
+                    expanded[torch.as_tensor(episode_ids, dtype=torch.long)] = local_values
+                    dataset.episode_data_index[key] = expanded
+            if hasattr(dataset, "hf_dataset") and dataset.hf_dataset is not None:
+                dataset.hf_dataset.set_transform(_data_loader._hf_transform_to_torch_allow_dict)
     return _data_loader.transform_dataset(dataset, data_config, skip_norm_stats=True)
 
 
@@ -1052,6 +1091,12 @@ def main() -> None:
     parser.add_argument("--batch_size", type=int, default=8, help="Batch size for value inference")
     parser.add_argument("--num_workers", type=int, default=None, help="DataLoader worker 数量")
     parser.add_argument("--decode_workers", type=int, default=None, help="兼容旧参数，等同于 --num_workers")
+    parser.add_argument(
+        "--episode_batch_size",
+        type=int,
+        default=16,
+        help="Episodes loaded into host memory per inference chunk; 0 loads the full dataset (default: 16)",
+    )
     parser.add_argument("--lookahead", type=int, default=50, help="N-step lookahead for Advantage")
     parser.add_argument(
         "--top_percent",
@@ -1086,6 +1131,8 @@ def main() -> None:
     args = parser.parse_args()
     if not 0.0 < args.top_percent <= 100.0:
         parser.error("--top_percent must be in (0, 100]")
+    if args.episode_batch_size < 0:
+        parser.error("--episode_batch_size must be >= 0")
 
     logging.basicConfig(level=logging.INFO, force=True)
     cache_dir = os.environ.get("JAX_COMPILATION_CACHE_DIR")
@@ -1163,27 +1210,71 @@ def main() -> None:
     if tasks_file.exists():
         tasks_map = _load_tasks_map(data_dir)
 
-    dataset = _build_inference_dataset(
-        data_dir=data_dir,
-        model_config=config,
-        tokenizer_path=resolved_tokenizer_path,
-        instruction_col=args.instruction_col,
-        base_image_col=args.base_image_col,
-        wrist_image_col=args.wrist_image_col,
-        right_wrist_image_col=args.right_wrist_image_col,
-        copy_wrist_to_right=args.copy_wrist_to_right,
-        tasks_map=tasks_map,
-    )
-    dataset = IndexedDataset(dataset, selected_dataset_indices)
-    LOG.info(console.info(f"待推理数据集大小: {len(dataset)} 帧"))
-    value_cache = _compute_values_with_dataloader(
-        dataset=dataset,
-        model=model,
-        supports=supports,
-        batch_size=args.batch_size,
-        num_workers=max_workers,
-        seed=args.seed,
-    )
+    inference_kwargs = {
+        "data_dir": data_dir,
+        "model_config": config,
+        "tokenizer_path": resolved_tokenizer_path,
+        "instruction_col": args.instruction_col,
+        "base_image_col": args.base_image_col,
+        "wrist_image_col": args.wrist_image_col,
+        "right_wrist_image_col": args.right_wrist_image_col,
+        "copy_wrist_to_right": args.copy_wrist_to_right,
+        "tasks_map": tasks_map,
+    }
+    if args.episode_batch_size == 0:
+        dataset = _build_inference_dataset(**inference_kwargs)
+        dataset = IndexedDataset(dataset, selected_dataset_indices)
+        LOG.info(console.info(f"待推理数据集大小: {len(dataset)} 帧"))
+        value_cache = _compute_values_with_dataloader(
+            dataset=dataset,
+            model=model,
+            supports=supports,
+            batch_size=args.batch_size,
+            num_workers=max_workers,
+            seed=args.seed,
+        )
+    else:
+        value_cache = InferredValueCache()
+        num_chunks = math.ceil(len(pending_requests) / args.episode_batch_size)
+        LOG.info(
+            console.info(
+                f"按 episode 分块推理: chunks={num_chunks}, "
+                f"episodes_per_chunk={args.episode_batch_size}"
+            )
+        )
+        for chunk_index, start in enumerate(
+            range(0, len(pending_requests), args.episode_batch_size),
+            start=1,
+        ):
+            chunk_requests = pending_requests[start : start + args.episode_batch_size]
+            episode_ids = [request.episode_id for request in chunk_requests]
+            expected_chunk_frames = sum(len(request.pending_positions) for request in chunk_requests)
+            LOG.info(
+                console.info(
+                    f"推理 chunk {chunk_index}/{num_chunks}: episodes={episode_ids[0]}..{episode_ids[-1]}, "
+                    f"frames={expected_chunk_frames}"
+                )
+            )
+            dataset = _build_inference_dataset(
+                **inference_kwargs,
+                episode_ids=episode_ids,
+            )
+            if len(dataset) != expected_chunk_frames:
+                raise ValueError(
+                    f"Chunk {chunk_index} dataset size mismatch: "
+                    f"loaded={len(dataset)}, expected={expected_chunk_frames}"
+                )
+            chunk_cache = _compute_values_with_dataloader(
+                dataset=dataset,
+                model=model,
+                supports=supports,
+                batch_size=args.batch_size,
+                num_workers=max_workers,
+                seed=args.seed + chunk_index,
+            )
+            _merge_value_caches(value_cache, chunk_cache)
+            del dataset, chunk_cache
+            gc.collect()
 
     advs_autonomous: list[np.ndarray] = []
     advantage_cache: dict[Path, np.ndarray] = {}
