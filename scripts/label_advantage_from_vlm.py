@@ -731,6 +731,7 @@ def _build_inference_dataset(
     right_wrist_image_col: str | None,
     copy_wrist_to_right: bool,
     tasks_map: dict[int, str] | None,
+    raw_dataset=None,
 ):
     from openpi.models.value_model_config import ValueModelConfig
     import openpi.training.config as _config
@@ -761,7 +762,9 @@ def _build_inference_dataset(
             ]
         ),
     )
-    dataset = _data_loader.create_torch_dataset(data_config, model_config.action_horizon, model_config)
+    dataset = raw_dataset
+    if dataset is None:
+        dataset = _data_loader.create_torch_dataset(data_config, model_config.action_horizon, model_config)
     return _data_loader.transform_dataset(dataset, data_config, skip_norm_stats=True)
 
 

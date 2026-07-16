@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
+import hashlib
+import json
 import logging
 import os
 from pathlib import Path
@@ -71,6 +73,22 @@ class EpisodeExportRequest:
     step_indices: np.ndarray
     dataset_row_indices: np.ndarray
     df: pd.DataFrame
+
+
+class CompactParquetDataset:
+    """Random-access dataset backed by a small parquet file of selected rows."""
+
+    def __init__(self, path: Path):
+        import pyarrow.parquet as pq
+
+        self._table = pq.read_table(path)
+
+    def __getitem__(self, index):
+        item = self._table.slice(index.__index__(), 1).to_pylist()[0]
+        return {key: np.asarray(value) if isinstance(value, list) else value for key, value in item.items()}
+
+    def __len__(self) -> int:
+        return len(self._table)
 
 
 def _extract_episode_id(df: pd.DataFrame, fallback: int) -> int:
@@ -220,6 +238,113 @@ def _write_output(rows: list[dict[str, Any]], output_path: Path) -> None:
         output.to_parquet(output_path, index=False)
 
 
+def _terminal_cache_path(
+    *,
+    data_dir: Path,
+    output_path: Path,
+    requests: list[EpisodeExportRequest],
+    selected_columns: list[str],
+) -> Path:
+    files = []
+    for request in requests:
+        stat = request.parquet_path.stat()
+        files.append(
+            (
+                str(request.parquet_path.resolve()),
+                stat.st_size,
+                stat.st_mtime_ns,
+                request.episode_id,
+            )
+        )
+    payload = {
+        "data_dir": str(data_dir.resolve()),
+        "files": files,
+        "columns": selected_columns,
+    }
+    digest = hashlib.sha1(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()[:16]
+    return output_path.parent / ".vlm_terminal_cache" / f"{data_dir.name}-{digest}.parquet"
+
+
+def _build_terminal_cache(
+    *,
+    data_dir: Path,
+    output_path: Path,
+    requests: list[EpisodeExportRequest],
+    base_image_col: str,
+    wrist_image_col: str | None,
+    right_wrist_image_col: str | None,
+    instruction_col: str | None,
+) -> Path:
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    selected_columns = list(
+        dict.fromkeys(
+            column
+            for column in (
+                base_image_col,
+                wrist_image_col,
+                right_wrist_image_col,
+                "state",
+                "episode_index",
+                "frame_index",
+                "index",
+                "task_index",
+                instruction_col,
+                "prompt",
+                "instruction",
+                "task",
+                "language_instruction",
+                "text",
+            )
+            if column
+        )
+    )
+    cache_path = _terminal_cache_path(
+        data_dir=data_dir,
+        output_path=output_path,
+        requests=requests,
+        selected_columns=selected_columns,
+    )
+    if cache_path.exists():
+        cached = pq.read_table(cache_path, columns=["episode_index"])
+        cached_episode_ids = [int(value) for value in cached.column("episode_index").to_pylist()]
+        expected_episode_ids = [request.episode_id for request in requests]
+        if cached_episode_ids == expected_episode_ids:
+            LOG.info("Reusing compact terminal-frame cache: %s", cache_path)
+            return cache_path
+        LOG.warning("Terminal-frame cache metadata does not match; rebuilding: %s", cache_path)
+
+    rows: list[dict[str, Any]] = []
+    output_schema = None
+    for request in tqdm(
+        requests,
+        desc="构建终点帧缓存",
+        bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]",
+    ):
+        parquet_file = pq.ParquetFile(request.parquet_path)
+        available_columns = set(parquet_file.schema_arrow.names)
+        columns = [column for column in selected_columns if column in available_columns]
+        table = parquet_file.read(columns=columns)
+        if len(table) == 0:
+            continue
+        terminal_row = table.slice(len(table) - 1, 1).to_pylist()[0]
+        rows.append(terminal_row)
+        if output_schema is None:
+            output_schema = table.select(columns).schema
+
+    if not rows or output_schema is None:
+        raise ValueError("No terminal rows were available for compact inference")
+
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = cache_path.with_suffix(cache_path.suffix + ".tmp")
+    compact_table = pa.Table.from_pylist(rows, schema=output_schema)
+    pq.write_table(compact_table, temp_path, compression="zstd")
+    os.replace(temp_path, cache_path)
+    LOG.info("Created compact terminal-frame cache with %d rows: %s", len(rows), cache_path)
+    return cache_path
+
+
 def main() -> None:
     import jax
     import jax.numpy as jnp
@@ -273,6 +398,7 @@ def main() -> None:
         jax.config.update("jax_compilation_cache_dir", cache_dir)
 
     data_dir = Path(args.data_dir)
+    output_path = Path(args.output_path)
     parquet_dir = data_dir / "data"
     if not parquet_dir.exists():
         raise ValueError(f"Cannot find data directory: {parquet_dir}")
@@ -357,6 +483,21 @@ def main() -> None:
     _validate_gemma_tokenizer(resolved_tokenizer_path)
 
     tasks_map = _load_tasks_map(data_dir) if (data_dir / "meta" / "tasks.jsonl").exists() else None
+    raw_dataset = None
+    inference_dataset_indices = selected_dataset_indices
+    if args.terminal_only:
+        terminal_cache_path = _build_terminal_cache(
+            data_dir=data_dir,
+            output_path=output_path,
+            requests=requests,
+            base_image_col=args.base_image_col,
+            wrist_image_col=args.wrist_image_col,
+            right_wrist_image_col=args.right_wrist_image_col,
+            instruction_col=args.instruction_col,
+        )
+        raw_dataset = CompactParquetDataset(terminal_cache_path)
+        inference_dataset_indices = list(range(len(raw_dataset)))
+
     dataset = _build_inference_dataset(
         data_dir=data_dir,
         model_config=config,
@@ -367,8 +508,9 @@ def main() -> None:
         right_wrist_image_col=args.right_wrist_image_col,
         copy_wrist_to_right=args.copy_wrist_to_right,
         tasks_map=tasks_map,
+        raw_dataset=raw_dataset,
     )
-    dataset = IndexedDataset(dataset, selected_dataset_indices)
+    dataset = IndexedDataset(dataset, inference_dataset_indices)
 
     value_cache = _compute_values_with_dataloader(
         dataset=dataset,
@@ -432,7 +574,6 @@ def main() -> None:
                 }
             )
 
-    output_path = Path(args.output_path)
     _write_output(rows, output_path)
     print(console.ok(f"完成: 导出 {len(rows)} 帧 VLM value 到 {output_path}"))
 
